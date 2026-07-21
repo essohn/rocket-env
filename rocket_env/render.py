@@ -90,7 +90,13 @@ class Renderer:
         return np.transpose(pygame.surfarray.array3d(self.surface), (1, 0, 2))
 
     def close(self) -> None:
-        pygame.quit()
+        """디스플레이만 닫는다.
+
+        pygame.quit() 은 프로세스 전역이다. 노트북에서 렌더링 환경을 둘
+        이상 띄워둔 채 하나를 닫으면 나머지의 폰트와 서피스까지 무효가 된다.
+        """
+        if self.render_mode == "human":
+            pygame.display.quit()
 
     # --- 좌표 변환 ---
 
@@ -121,15 +127,32 @@ class Renderer:
             pygame.draw.line(self.surface, PAD_COLOR, left, right, 6)
             return
 
-        x_tower = self.cfg["catch"]["x_tower"]
-        y_arm = self.cfg["catch"]["y_arm"]
-        zone_r = self.cfg["success"]["zone_r"]
+        x_tower, y_arm, arm_half, window_half = self._catch_geometry(target)
         base = self._to_px(x_tower, 0.0)
         top = self._to_px(x_tower, y_arm * 1.25)
         pygame.draw.line(self.surface, TOWER_COLOR, base, top, 8)
-        left = self._to_px(x_tower - zone_r * 3.0, y_arm)
-        right = self._to_px(x_tower + zone_r * 3.0, y_arm)
-        pygame.draw.line(self.surface, ARM_COLOR, left, right, 7)
+
+        # 팔 구조물. 포획 창보다 넓게 그린다 — 6 m 는 화면에서 13 px 밖에
+        # 안 돼서 구조물로 알아보기 어렵다.
+        pygame.draw.line(self.surface, TOWER_COLOR,
+                         self._to_px(x_tower - arm_half, y_arm),
+                         self._to_px(x_tower + arm_half, y_arm), 7)
+        # 실제 포획 판정 범위(±zone_r). 이걸 따로 그리지 않으면 학생은
+        # 팔 안쪽으로 잘 지나간 것처럼 보이는데 MISSED 가 뜨는 이유를
+        # 알 수 없다. 디버깅하라고 만든 그림이 디버깅을 방해하게 된다.
+        pygame.draw.line(self.surface, ARM_COLOR,
+                         self._to_px(x_tower - window_half, y_arm),
+                         self._to_px(x_tower + window_half, y_arm), 11)
+
+    def _catch_geometry(self, target: tuple[float, float]):
+        """타워 x, 팔 높이, 팔 반폭, 실제 포획 창 반폭을 돌려준다.
+
+        구조물 폭과 판정 폭을 한곳에서 분리해 두어야, 렌더러가 임계값을
+        잘못 그리는 일이 생기지 않고 테스트로 고정할 수도 있다.
+        """
+        x_tower, y_arm = target
+        window_half = self.cfg["success"]["zone_r"]
+        return x_tower, y_arm, max(window_half * 3.0, 18.0), window_half
 
     def _trail(self) -> None:
         if len(self.trail) < 2:
@@ -159,7 +182,8 @@ class Renderer:
             return
         length = 6.0 + 22.0 * (state.thrust / (2.0 * G))
         nozzle = (0.0, -ROCKET_HEIGHT / 2.0)
-        tip = (length * math.sin(state.phi), -ROCKET_HEIGHT / 2.0 - length)
+        tip = (length * math.sin(state.phi),
+               -ROCKET_HEIGHT / 2.0 - length * math.cos(state.phi))
         color = (255, 210, 90) if state.thrust < 1.5 * G else (255, 140, 60)
         points = [
             self._body_to_px(state, nozzle[0] - 3.0, nozzle[1]),
