@@ -87,46 +87,57 @@ CATCH_OVERRIDES: dict[str, Any] = {
 }
 
 PRESETS: dict[str, dict[str, Any]] = {
-    "landing-easy": {
+    # 라운드마다 난이도 축을 하나씩만 추가한다. 여러 축을 동시에 올리면
+    # 학생은 무엇이 새로 어려워졌는지 모르고, 조교는 어디서 막히는지
+    # 진단할 수 없다.
+    "landing-basic": {
         "task": "landing",
         "wind": {"mode": "none", "max_speed": 0.0},
         "fuel": {"capacity": None},
-        # 초기 자세를 성공 임계(±10°) 안쪽으로 잡는다. 1단계에서는 자세
-        # 보정 없이 "내려오는 속도 줄이기"만 배우면 되게 한다. 고도와
-        # 초기 하강속도도 낮춰 에피소드를 짧게 만든다.
         "init": {"y": 200.0, "vy_range": [-20.0, -20.0],
                  "x_range": [-50.0, 50.0], "theta_range_deg": [-5.0, 5.0]},
     },
-    "landing-normal": {
+    # + 자세 보정: 초기 기울기가 성공 임계(±10°)를 벗어난다.
+    "landing-attitude": {
+        "task": "landing",
+        "wind": {"mode": "none", "max_speed": 0.0},
+        "fuel": {"capacity": None},
+        "init": {"y": 200.0, "vy_range": [-20.0, -20.0],
+                 "x_range": [-50.0, 50.0], "theta_range_deg": [-30.0, 30.0]},
+    },
+    # + 고속 진입: 고도와 초기 하강속도가 올라간다.
+    "landing-descent": {
+        "task": "landing",
+        "wind": {"mode": "none", "max_speed": 0.0},
+        "fuel": {"capacity": None},
+        "init": {"y": 450.0, "vy_range": [-50.0, -40.0],
+                 "x_range": [-50.0, 50.0], "theta_range_deg": [-30.0, 30.0]},
+    },
+    # + 외란: 에피소드 내내 일정한 옆바람.
+    "landing-wind": {
         "task": "landing",
         "wind": {"mode": "constant", "max_speed": 8.0},
-        "fuel": {"capacity": 120.0},
-        "init": {"y": 450.0, "vy_range": [-60.0, -50.0],
-                 "x_range": [-150.0, 150.0], "theta_range_deg": [-45.0, 45.0]},
+        "fuel": {"capacity": None},
+        "init": {"y": 450.0, "vy_range": [-50.0, -40.0],
+                 "x_range": [-50.0, 50.0], "theta_range_deg": [-30.0, 30.0]},
     },
-    "landing-hard": {
+    # + 불확실성과 자원: 돌풍이 되고 연료가 유한해진다. 이 라운드만 축이
+    #   둘인데, 둘 다 "예측할 수 없는 조건에서 버티기"라는 한 주제다.
+    "landing-gust": {
         "task": "landing",
-        "wind": {"mode": "gust", "max_speed": 15.0,
+        "wind": {"mode": "gust", "max_speed": 12.0,
                  "ou_theta": 0.15, "ou_sigma": 3.0},
-        "fuel": {"capacity": 90.0},
-        "init": {"y": 450.0, "vy_range": [-70.0, -60.0],
-                 "x_range": [-200.0, 200.0], "theta_range_deg": [-85.0, 85.0]},
-        "success": {"zone_r": 30.0},
+        "fuel": {"capacity": 120.0},
+        "init": {"y": 450.0, "vy_range": [-50.0, -40.0],
+                 "x_range": [-50.0, 50.0], "theta_range_deg": [-30.0, 30.0]},
     },
-    "catch-normal": {
+    # + 정밀 포획: 지면 대신 발사탑 팔 높이를 통과해야 한다.
+    "catch": {
         "task": "catch",
         "wind": {"mode": "constant", "max_speed": 5.0},
         "fuel": {"capacity": 140.0},
         "init": {"y": 450.0, "vy_range": [-50.0, -40.0],
-                 "x_range": [-100.0, 100.0], "theta_range_deg": [-30.0, 30.0]},
-    },
-    "catch-hard": {
-        "task": "catch",
-        "wind": {"mode": "gust", "max_speed": 12.0,
-                 "ou_theta": 0.15, "ou_sigma": 3.0},
-        "fuel": {"capacity": 110.0},
-        "init": {"y": 450.0, "vy_range": [-60.0, -55.0],
-                 "x_range": [-150.0, 150.0], "theta_range_deg": [-60.0, 60.0]},
+                 "x_range": [-50.0, 50.0], "theta_range_deg": [-30.0, 30.0]},
     },
 }
 

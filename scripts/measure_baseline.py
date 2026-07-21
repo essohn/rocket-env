@@ -7,7 +7,7 @@
 환경도 모든 테스트를 통과한다. 변별력은 재봐야 안다.
 
 사용:
-    uv run python scripts/measure_baseline.py --preset landing-easy --steps 100000
+    uv run python scripts/measure_baseline.py --preset landing-basic --steps 100000
 """
 
 import argparse
@@ -41,7 +41,7 @@ def evaluate(env, act) -> tuple[float, float]:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--preset", default="landing-easy", choices=list(PRESETS))
+    parser.add_argument("--preset", default="landing-basic", choices=list(PRESETS))
     parser.add_argument("--steps", type=int, default=100_000)
     parser.add_argument("--lr", type=float, default=6e-4)
     args = parser.parse_args()

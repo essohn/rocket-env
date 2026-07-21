@@ -66,7 +66,7 @@ def test_observation_is_finite_and_correctly_typed():
 
 
 def test_unlimited_fuel_shows_full_fuel_fraction():
-    env = RocketEnv(config=PRESETS["landing-easy"])
+    env = RocketEnv(config=PRESETS["landing-basic"])
     obs, _ = env.reset(seed=0)
     assert obs[8] == pytest.approx(1.0)
 
@@ -81,7 +81,7 @@ def test_info_contains_every_contract_key():
 
 
 def test_same_seed_reproduces_identical_trajectories():
-    env = RocketEnv(config=PRESETS["landing-hard"])
+    env = RocketEnv(config=PRESETS["landing-gust"])
     a, _ = rollout(env, NOOP, seed=123)
     b, _ = rollout(env, NOOP, seed=123)
     c, _ = rollout(env, NOOP, seed=124)
@@ -92,7 +92,7 @@ def test_same_seed_reproduces_identical_trajectories():
 def test_config_seed_is_not_consumed_by_the_env():
     """cfg['seed']는 호출자 메타데이터다. 환경이 읽으면 학습 시
     모든 에피소드가 동일해지는 버그가 생긴다."""
-    env = RocketEnv(config={**PRESETS["landing-normal"], "seed": 7})
+    env = RocketEnv(config={**PRESETS["landing-descent"], "seed": 7})
     env.reset()
     first = env.unwrapped.state.x
     env.reset()
@@ -100,7 +100,7 @@ def test_config_seed_is_not_consumed_by_the_env():
 
 
 def test_zero_thrust_from_altitude_ends_in_crash():
-    env = RocketEnv(config=PRESETS["landing-normal"])
+    env = RocketEnv(config=PRESETS["landing-descent"])
     _, info = rollout(env, NOOP, seed=0)
     assert info["outcome"] == Outcome.CRASH
     assert info["is_success"] is False
@@ -108,7 +108,7 @@ def test_zero_thrust_from_altitude_ends_in_crash():
 
 
 def test_running_out_of_fuel_is_reported_distinctly():
-    env = RocketEnv(config={**PRESETS["landing-normal"],
+    env = RocketEnv(config={**PRESETS["landing-descent"],
                             "fuel": {"capacity": 1.0}})
     _, info = rollout(env, FULL_UP, seed=0)
     assert info["outcome"] == Outcome.OUT_OF_FUEL
@@ -116,7 +116,7 @@ def test_running_out_of_fuel_is_reported_distinctly():
 
 def test_timeout_truncates_rather_than_terminates():
     """추력 1g 부근으로 떠 있으면 max_steps에 걸린다."""
-    env = RocketEnv(config={**PRESETS["landing-easy"], "max_steps": 30})
+    env = RocketEnv(config={**PRESETS["landing-basic"], "max_steps": 30})
     env.reset(seed=0)
     for _ in range(30):
         obs, reward, terminated, truncated, info = env.step(7)  # 1.0g, 노즐 정지
@@ -126,7 +126,7 @@ def test_timeout_truncates_rather_than_terminates():
 
 
 def test_fuel_never_goes_negative():
-    env = RocketEnv(config={**PRESETS["landing-normal"],
+    env = RocketEnv(config={**PRESETS["landing-descent"],
                             "fuel": {"capacity": 2.0}})
     env.reset(seed=0)
     for _ in range(200):
@@ -137,7 +137,7 @@ def test_fuel_never_goes_negative():
 
 
 def test_wind_disabled_config_keeps_wind_at_zero():
-    env = RocketEnv(config=PRESETS["landing-easy"])
+    env = RocketEnv(config=PRESETS["landing-basic"])
     env.reset(seed=0)
     for _ in range(50):
         _, _, terminated, truncated, info = env.step(NOOP)
@@ -153,7 +153,7 @@ def test_step_reward_matches_hand_computed_shaping():
     나머지 테스트는 전부 통과한다 — 아무도 보상값을 보지 않기 때문이다.
     추력 0인 NOOP 을 써서 연료 패널티 항을 0으로 만들고 shaping 만 남긴다.
     """
-    env = RocketEnv(config=PRESETS["landing-easy"])
+    env = RocketEnv(config=PRESETS["landing-basic"])
     env.reset(seed=0)
     inner = env.unwrapped
     before = potential(inner.state, inner._target, inner.cfg)
@@ -168,7 +168,7 @@ def test_step_reward_matches_hand_computed_shaping():
 
 def test_observation_places_sin_and_cos_in_the_right_slots():
     """자세 30도면 sin=0.5, cos=0.866 으로 값이 뚜렷이 달라 뒤바뀜이 드러난다."""
-    env = RocketEnv(config=PRESETS["landing-normal"])
+    env = RocketEnv(config=PRESETS["landing-descent"])
     env.reset(seed=0)
     inner = env.unwrapped
     inner.state = replace(inner.state, theta=math.radians(30.0))
@@ -179,7 +179,7 @@ def test_observation_places_sin_and_cos_in_the_right_slots():
 
 def test_observation_uses_distinct_scales_for_position_and_velocity():
     """위치와 속도를 같은 상수로 나누면 물리적으로 다른 양이 같은 값이 된다."""
-    env = RocketEnv(config=PRESETS["landing-normal"])
+    env = RocketEnv(config=PRESETS["landing-descent"])
     env.reset(seed=0)
     inner = env.unwrapped
     tx, ty = inner._target
@@ -192,7 +192,7 @@ def test_observation_uses_distinct_scales_for_position_and_velocity():
 
 
 def test_observation_reports_time_and_wind_fractions():
-    env = RocketEnv(config={**PRESETS["landing-normal"], "max_steps": 100})
+    env = RocketEnv(config={**PRESETS["landing-descent"], "max_steps": 100})
     env.reset(seed=0)
     inner = env.unwrapped
     inner.state = replace(inner.state, step=25, wind_x=10.0)
@@ -202,6 +202,6 @@ def test_observation_reports_time_and_wind_fractions():
 
 
 def test_catch_task_can_be_selected_by_config():
-    env = RocketEnv(config=PRESETS["catch-normal"])
+    env = RocketEnv(config=PRESETS["catch"])
     _, info = rollout(env, NOOP, seed=0)
     assert info["outcome"] in (Outcome.MISSED, Outcome.CRASH)

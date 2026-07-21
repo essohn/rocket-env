@@ -11,7 +11,7 @@ from rocket_env.config import PRESETS, build_config
 from rocket_env.tasks import make_task
 from rocket_env.types import Outcome, State
 
-CFG = build_config(PRESETS["catch-normal"])
+CFG = build_config(PRESETS["catch"])
 TASK = make_task("catch")
 Y_ARM = CFG["catch"]["y_arm"]
 
@@ -111,7 +111,7 @@ def test_reaching_the_ground_without_crossing_crashes():
 
 
 def test_offset_tower_shifts_the_capture_zone():
-    cfg = build_config({**PRESETS["catch-normal"],
+    cfg = build_config({**PRESETS["catch"],
                         "catch": {"x_tower": 100.0, "y_arm": Y_ARM}})
     prev, cur = crossing(x=100.0, vy=-1.0)
     assert TASK.evaluate(prev, cur, cfg) == Outcome.SUCCESS

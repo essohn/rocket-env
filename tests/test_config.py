@@ -80,8 +80,8 @@ def test_none_fuel_capacity_is_allowed():
 
 
 @pytest.mark.parametrize("name", [
-    "landing-easy", "landing-normal", "landing-hard",
-    "catch-normal", "catch-hard",
+    "landing-basic", "landing-attitude", "landing-descent",
+    "landing-wind", "landing-gust", "catch",
 ])
 def test_every_preset_builds(name):
     cfg = build_config(PRESETS[name])
@@ -101,18 +101,19 @@ def test_unknown_nested_key_raises_config_error():
 
 
 @pytest.mark.parametrize("name,path,expected", [
-    ("landing-easy", ("wind", "max_speed"), 0.0),
-    ("landing-easy", ("fuel", "capacity"), None),
-    ("landing-normal", ("wind", "max_speed"), 8.0),
-    ("landing-normal", ("fuel", "capacity"), 120.0),
-    ("landing-hard", ("wind", "ou_sigma"), 3.0),
-    ("landing-hard", ("fuel", "capacity"), 90.0),
-    ("landing-hard", ("success", "zone_r"), 30.0),
-    ("catch-normal", ("fuel", "capacity"), 140.0),
-    ("catch-normal", ("success", "zone_r"), 6.0),
-    ("catch-normal", ("reward", "w_speed"), 60.0),
-    ("catch-hard", ("wind", "max_speed"), 12.0),
-    ("catch-hard", ("fuel", "capacity"), 110.0),
+    ("landing-basic", ("wind", "max_speed"), 0.0),
+    ("landing-basic", ("fuel", "capacity"), None),
+    ("landing-basic", ("init", "y"), 200.0),
+    ("landing-attitude", ("init", "theta_range_deg"), [-30.0, 30.0]),
+    ("landing-attitude", ("init", "y"), 200.0),
+    ("landing-descent", ("init", "y"), 450.0),
+    ("landing-descent", ("wind", "max_speed"), 0.0),
+    ("landing-wind", ("wind", "mode"), "constant"),
+    ("landing-wind", ("wind", "max_speed"), 8.0),
+    ("landing-gust", ("wind", "ou_sigma"), 3.0),
+    ("landing-gust", ("fuel", "capacity"), 120.0),
+    ("catch", ("success", "zone_r"), 6.0),
+    ("catch", ("reward", "w_speed"), 60.0),
 ])
 def test_preset_literal_values(name, path, expected):
     """프리셋 리터럴을 고정한다.
@@ -127,8 +128,8 @@ def test_preset_literal_values(name, path, expected):
 
 
 def test_reward_change_is_free_and_produces_no_warning():
-    eval_cfg = build_config(PRESETS["landing-normal"])
-    train_cfg = build_config({**PRESETS["landing-normal"],
+    eval_cfg = build_config(PRESETS["landing-descent"])
+    train_cfg = build_config({**PRESETS["landing-descent"],
                               "reward": {"success_base": 999.0}})
     ok, warnings, errors = validate_train_config(train_cfg, eval_cfg)
     assert ok
@@ -137,8 +138,8 @@ def test_reward_change_is_free_and_produces_no_warning():
 
 
 def test_success_threshold_change_warns_but_passes():
-    eval_cfg = build_config(PRESETS["landing-normal"])
-    train_cfg = build_config({**PRESETS["landing-normal"],
+    eval_cfg = build_config(PRESETS["landing-descent"])
+    train_cfg = build_config({**PRESETS["landing-descent"],
                               "success": {"v_max": 99.0}})
     ok, warnings, errors = validate_train_config(train_cfg, eval_cfg)
     assert ok
@@ -147,8 +148,8 @@ def test_success_threshold_change_warns_but_passes():
 
 
 def test_task_mismatch_is_an_error():
-    eval_cfg = build_config(PRESETS["landing-normal"])
-    train_cfg = build_config(PRESETS["catch-normal"])
+    eval_cfg = build_config(PRESETS["landing-descent"])
+    train_cfg = build_config(PRESETS["catch"])
     ok, warnings, errors = validate_train_config(train_cfg, eval_cfg)
     assert not ok
     assert any("task" in e for e in errors)

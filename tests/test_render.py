@@ -23,7 +23,7 @@ def a_state(cfg):
     return sample_initial_state(np.random.default_rng(0), cfg)
 
 
-@pytest.mark.parametrize("preset", ["landing-normal", "catch-normal"])
+@pytest.mark.parametrize("preset", ["landing-descent", "catch"])
 def test_rgb_array_has_the_expected_shape_and_dtype(preset):
     env = RocketEnv(config=PRESETS[preset], render_mode="rgb_array")
     env.reset(seed=0)
@@ -33,7 +33,7 @@ def test_rgb_array_has_the_expected_shape_and_dtype(preset):
     env.close()
 
 
-@pytest.mark.parametrize("preset", ["landing-normal", "catch-normal"])
+@pytest.mark.parametrize("preset", ["landing-descent", "catch"])
 def test_rendering_survives_a_whole_episode(preset):
     env = RocketEnv(config=PRESETS[preset], render_mode="rgb_array")
     env.reset(seed=0)
@@ -50,7 +50,7 @@ def test_rendering_survives_a_whole_episode(preset):
     Outcome.MISSED, Outcome.TIMEOUT, Outcome.OUT_OF_FUEL,
 ])
 def test_every_outcome_banner_draws(outcome):
-    cfg = build_config(PRESETS["landing-normal"])
+    cfg = build_config(PRESETS["landing-descent"])
     renderer = Renderer(cfg, "rgb_array")
     frame = renderer.draw(a_state(cfg), (0.0, 25.0), outcome)
     assert frame.shape == (HEIGHT, WIDTH, 3)
@@ -63,7 +63,7 @@ def test_catch_capture_window_matches_the_success_threshold():
     팔 구조물은 보이도록 넓게 그리지만, 판정 범위를 따로 표시하지 않으면
     학생은 팔 안쪽으로 지나갔는데 MISSED 가 뜨는 이유를 알 수 없다.
     """
-    cfg = build_config(PRESETS["catch-normal"])
+    cfg = build_config(PRESETS["catch"])
     renderer = Renderer(cfg, "rgb_array")
     _, _, arm_half, window_half = renderer._catch_geometry((0.0, 80.0))
     assert window_half == cfg["success"]["zone_r"]
@@ -73,7 +73,7 @@ def test_catch_capture_window_matches_the_success_threshold():
 
 def test_closing_one_renderer_does_not_break_another():
     """close() 가 pygame 을 전역 종료하면 살아 있는 다른 렌더러가 깨진다."""
-    cfg = build_config(PRESETS["landing-normal"])
+    cfg = build_config(PRESETS["landing-descent"])
     first = Renderer(cfg, "rgb_array")
     second = Renderer(cfg, "rgb_array")
     first.close()
@@ -90,7 +90,7 @@ def test_render_returns_none_when_render_mode_is_none():
 
 
 def test_reset_clears_the_trail():
-    cfg = build_config(PRESETS["landing-normal"])
+    cfg = build_config(PRESETS["landing-descent"])
     renderer = Renderer(cfg, "rgb_array")
     state = a_state(cfg)
     for _ in range(5):

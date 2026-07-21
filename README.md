@@ -40,10 +40,11 @@ print(info["outcome"], info["is_success"], info["impact_speed"])
 ```python
 from rocket_env import PRESETS
 
-env = gym.make("rocket-v0", config=PRESETS["catch-hard"])
+env = gym.make("rocket-v0", config=PRESETS["catch"])
 ```
 
-`landing-easy`, `landing-normal`, `landing-hard`, `catch-normal`, `catch-hard`.
+`landing-basic`, `landing-attitude`, `landing-descent`, `landing-wind`,
+`landing-gust`, `catch`. 라운드마다 난이도 축을 하나씩만 추가한다.
 
 ## 관찰과 행동
 

@@ -23,7 +23,7 @@ from rocket_env.config import PRESETS  # noqa: E402
 @pytest.mark.slow
 def test_dqn_trains_and_predicts_without_error(tmp_path):
     env = gym.make("rocket-v0", render_mode="rgb_array",
-                   config=PRESETS["landing-easy"])
+                   config=PRESETS["landing-basic"])
     model = DQN("MlpPolicy", env, verbose=0, device="cpu",
                 learning_starts=200, buffer_size=5_000,
                 policy_kwargs={"net_arch": [64, 64]})
@@ -43,7 +43,7 @@ def test_dqn_trains_and_predicts_without_error(tmp_path):
 def test_server_evaluation_loop_shape_works():
     """서버 워커의 평가 루프와 동일한 형태로 돌려본다."""
     env = gym.make("rocket-v0", render_mode="rgb_array",
-                   config=PRESETS["landing-normal"])
+                   config=PRESETS["landing-descent"])
     scores, outcomes = [], []
     rng = np.random.default_rng(0)
 

@@ -10,7 +10,7 @@ from rocket_env.physics import ROCKET_HEIGHT, WORLD_Y_MAX
 from rocket_env.tasks import make_task
 from rocket_env.types import Outcome, State
 
-CFG = build_config(PRESETS["landing-normal"])
+CFG = build_config(PRESETS["landing-gust"])
 TASK = make_task("landing")
 GROUND = ROCKET_HEIGHT / 2.0
 
@@ -113,7 +113,7 @@ def test_initial_state_respects_config_ranges():
 
 
 def test_unlimited_fuel_config_yields_infinite_fuel():
-    cfg = build_config(PRESETS["landing-easy"])
+    cfg = build_config(PRESETS["landing-basic"])
     s = TASK.initial_state(np.random.default_rng(0), cfg)
     assert math.isinf(s.fuel)
 

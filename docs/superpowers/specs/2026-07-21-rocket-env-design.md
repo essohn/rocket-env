@@ -377,7 +377,7 @@ R = failure_max · clip(1 - d_final / d_initial, 0, 1)
 
 ## 9. Config 스키마와 잠금 정책
 
-### 전체 스키마 (기본값 = `landing-normal`)
+### 전체 스키마 (기본값 = 프리셋과 무관한 원본 기본값)
 
 ```python
 {
@@ -453,17 +453,29 @@ R = failure_max · clip(1 - d_final / d_initial, 0, 1)
 
 ### 라운드 프리셋
 
-`rocket_env.config.PRESETS`에 5종을 제공한다.
+`rocket_env.config.PRESETS`에 6종을 제공한다. 라운드마다 난이도 축을 하나씩만
+추가한다 — 두 라운드 사이에서 여러 축이 동시에 바뀌면 학생은 무엇이 새로
+어려워졌는지 모르고, 조교는 어디서 막히는지 진단할 수 없다. 착륙 라운드는
+모두 `success` 임계값(zone_r 포함)을 공유한다 — 난이도는 초기 조건과 외란에서만
+온다.
 
-| 프리셋 | task | wind | fuel | init θ | vy₀ | zone_r |
-|--------|------|------|------|--------|-----|--------|
-| `landing-easy` | landing | none | ∞ | ±5° | -20 | 50 |
-| `landing-normal` | landing | constant 8 m/s | 120 | ±45° | -60~-50 | 50 |
-| `landing-hard` | landing | gust (σ=3, ±15) | 90 | ±85° | -70~-60 | 30 |
-| `catch-normal` | catch | constant 5 m/s | 140 | ±30° | -50~-40 | 6 |
-| `catch-hard` | catch | gust (σ=3, ±12) | 110 | ±60° | -60~-55 | 6 |
+| 프리셋 | task | wind | fuel | y₀ | vy₀ | init θ | zone_r |
+|--------|------|------|------|----|----|--------|--------|
+| `landing-basic` | landing | none | ∞ | 200 | -20 | ±5° | 50 |
+| `landing-attitude` | landing | none | ∞ | 200 | -20 | ±30° | 50 |
+| `landing-descent` | landing | none | ∞ | 450 | -50~-40 | ±30° | 50 |
+| `landing-wind` | landing | constant 8 m/s | ∞ | 450 | -50~-40 | ±30° | 50 |
+| `landing-gust` | landing | gust (σ=3, ±12) | 120 | 450 | -50~-40 | ±30° | 50 |
+| `catch` | catch | constant 5 m/s | 140 | 450 | -50~-40 | ±30° | 6 |
 
-`gust` 프리셋은 모두 `ou_theta = 0.15`를 쓴다. `ou_theta`는 평균회귀 속도로, 0.15에서
+축 진행: `landing-basic`이 자세 보정 없이(±5°는 성공 임계 ±10° 안쪽) 감속만
+가르치고, `landing-attitude`가 자세 보정을 추가하고(±30°), `landing-descent`가
+고도·하강속도를 올리고, `landing-wind`가 일정한 옆바람을, `landing-gust`가
+돌풍과 유한 연료를(이 라운드만 축이 둘이며, 둘 다 "예측 불가능한 조건에서
+버티기"라는 한 주제다) 추가한다. `catch`는 지면 대신 발사탑 팔 높이를
+통과해야 하는 별도 태스크다.
+
+`gust` 프리셋은 `ou_theta = 0.15`를 쓴다. `ou_theta`는 평균회귀 속도로, 0.15에서
 바람의 상관 시간이 대략 `1/0.15 ≈ 6.7초`가 된다 — 40초 에피소드 안에 약 6회 방향이 바뀌는 셈이라
 "돌풍"으로 체감되면서도 제어 불가능할 만큼 빠르지는 않다.
 

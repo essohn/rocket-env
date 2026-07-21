@@ -12,7 +12,7 @@ from rocket_env.config import PRESETS, build_config
 from rocket_env.reward import potential, shaping, terminal_reward
 from rocket_env.types import Outcome, State
 
-CFG = build_config(PRESETS["landing-normal"])
+CFG = build_config(PRESETS["landing-descent"])
 TARGET = (0.0, 25.0)
 
 
@@ -173,7 +173,7 @@ def test_timeout_scores_zero_even_in_a_near_perfect_state():
 
 
 def test_catch_profile_rewards_slow_contact_much_more_steeply():
-    catch_cfg = build_config(PRESETS["catch-normal"])
+    catch_cfg = build_config(PRESETS["catch"])
     target = (0.0, catch_cfg["catch"]["y_arm"])
 
     def score(speed):
