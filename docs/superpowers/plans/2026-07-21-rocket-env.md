@@ -650,6 +650,43 @@ def test_every_preset_builds(name):
     assert cfg["reward"]["shaping_gamma"] == 1.0
 
 
+def test_unknown_top_level_key_raises_config_error():
+    with pytest.raises(ConfigError, match="wnid"):
+        build_config({"wnid": {"mode": "none"}})
+
+
+def test_unknown_nested_key_raises_config_error():
+    """오타 난 키가 조용히 무시되면 설정 없이 학습이 끝난다."""
+    with pytest.raises(ConfigError, match="fuel.capacty"):
+        build_config({"fuel": {"capacty": 50.0}})
+
+
+@pytest.mark.parametrize("name,path,expected", [
+    ("landing-easy", ("wind", "max_speed"), 0.0),
+    ("landing-easy", ("fuel", "capacity"), None),
+    ("landing-normal", ("wind", "max_speed"), 8.0),
+    ("landing-normal", ("fuel", "capacity"), 120.0),
+    ("landing-hard", ("wind", "ou_sigma"), 3.0),
+    ("landing-hard", ("fuel", "capacity"), 90.0),
+    ("landing-hard", ("success", "zone_r"), 30.0),
+    ("catch-normal", ("fuel", "capacity"), 140.0),
+    ("catch-normal", ("success", "zone_r"), 6.0),
+    ("catch-normal", ("reward", "w_speed"), 60.0),
+    ("catch-hard", ("wind", "max_speed"), 12.0),
+    ("catch-hard", ("fuel", "capacity"), 110.0),
+])
+def test_preset_literal_values(name, path, expected):
+    """프리셋 리터럴을 고정한다.
+
+    이 값들이 각 라운드의 난이도와 배점을 정한다. 자리 하나가 바뀌어도
+    나머지 테스트는 전부 통과하므로, 값 자체를 단언하는 곳이 필요하다.
+    """
+    value = build_config(PRESETS[name])
+    for key in path:
+        value = value[key]
+    assert value == expected
+
+
 def test_reward_change_is_free_and_produces_no_warning():
     eval_cfg = build_config(PRESETS["landing-normal"])
     train_cfg = build_config({**PRESETS["landing-normal"],
@@ -833,6 +870,25 @@ def _deep_merge(base: dict, overlay: dict) -> dict:
     return out
 
 
+def _reject_unknown_keys(user: dict, schema: dict, path: str = "") -> None:
+    """스키마에 없는 키를 거부한다.
+
+    오타 난 키가 조용히 무시되는 것이 가장 나쁜 실패 모드다.
+    `{"fuel": {"capacty": 50.0}}` 처럼 한 글자만 틀려도 병합은 성공하고,
+    의도한 설정이 전혀 적용되지 않은 채로 몇 시간짜리 학습이 끝난다.
+    라운드 설정을 쓰는 조교도 학생도 이 실수는 즉시 알아야 한다.
+    """
+    for key, value in user.items():
+        full = f"{path}{key}"
+        if key not in schema:
+            raise ConfigError(
+                f"알 수 없는 설정 키: {full!r}. "
+                f"사용 가능한 키: {sorted(schema)}"
+            )
+        if isinstance(value, dict) and isinstance(schema[key], dict):
+            _reject_unknown_keys(value, schema[key], path=f"{full}.")
+
+
 def build_config(user_config: dict | None) -> dict:
     """기본값 → 태스크 프로파일 → 사용자 설정 순으로 병합한 완전한 설정."""
     user = user_config or {}
@@ -842,6 +898,8 @@ def build_config(user_config: dict | None) -> dict:
         raise ConfigError(
             f"다음 키는 환경 상수라 변경할 수 없습니다: {sorted(locked)}"
         )
+
+    _reject_unknown_keys(user, DEFAULT_CONFIG)
 
     task = user.get("task", DEFAULT_CONFIG["task"])
     if task not in ("landing", "catch"):
@@ -911,7 +969,7 @@ def validate_train_config(train_cfg: dict,
 uv run pytest tests/test_config.py -v
 ```
 
-기대: 18 passed (parametrize 5건 포함).
+기대: 32 passed (parametrize 5 + 12건 포함).
 
 - [ ] **Step 5: 커밋**
 
