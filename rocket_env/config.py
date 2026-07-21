@@ -65,6 +65,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "shaping_gamma": 1.0,
         "shaping_w_dist": 1.0,
         "shaping_w_attitude": 0.5,
+        "shaping_w_speed": 0.5,
         "fuel_penalty": 0.05,
     },
 }

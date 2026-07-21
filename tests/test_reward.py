@@ -9,12 +9,7 @@ import math
 import pytest
 
 from rocket_env.config import PRESETS, build_config
-from rocket_env.reward import (
-    distance_to_target,
-    potential,
-    shaping,
-    terminal_reward,
-)
+from rocket_env.reward import potential, shaping, terminal_reward
 from rocket_env.types import Outcome, State
 
 CFG = build_config(PRESETS["landing-normal"])
@@ -67,7 +62,7 @@ def test_shaping_total_is_independent_of_episode_length():
 
 def test_perfect_landing_scores_near_the_maximum():
     r = terminal_reward(Outcome.SUCCESS, at(x=0.0, y=25.0, step=0),
-                        TARGET, CFG, d_initial=425.0, fuel_frac=1.0)
+                        TARGET, CFG, fuel_frac=1.0)
     assert r == pytest.approx(250.0, abs=0.5)
 
 
@@ -80,24 +75,65 @@ def test_marginal_success_still_beats_every_failure():
            vy=-(s["v_max"] - 0.01),
            theta=math.radians(s["theta_max_deg"] - 0.01),
            step=CFG["max_steps"]),
-        TARGET, CFG, d_initial=425.0, fuel_frac=0.0)
+        TARGET, CFG, fuel_frac=0.0)
     best_failure = CFG["reward"]["failure_max"]
     assert marginal > best_failure
 
 
-def test_crash_at_start_position_scores_zero():
-    """진행이 없으면 부분 점수도 없다 — '빨리 자폭' 전략의 봉쇄."""
-    start = at(x=0.0, y=450.0)
-    d0 = distance_to_target(start, TARGET)
-    r = terminal_reward(Outcome.CRASH, start, TARGET, CFG,
-                        d_initial=d0, fuel_frac=0.5)
-    assert r == pytest.approx(0.0, abs=1e-9)
+def test_freefall_impact_scores_zero():
+    """자유낙하로 지면에 꽂히면 0점이다.
+
+    예전에는 목표까지의 직선 거리로 채점해서, 목표가 지면에 있는 탓에
+    중력이 거리를 공짜로 닫아 주었다. 아무것도 안 하는 정책이 실패 점수의
+    80~89%를 받았고, 학습된 DQN 이 무행동보다 낮은 점수를 받았다.
+    """
+    impact = at(x=0.0, y=25.0, vy=-49.5)     # 종단속도로 접지
+    r = terminal_reward(Outcome.CRASH, impact, TARGET, CFG, fuel_frac=0.5)
+    assert r == pytest.approx(0.0)
 
 
-def test_crash_at_target_scores_the_failure_maximum():
-    r = terminal_reward(Outcome.CRASH, at(x=0.0, y=25.0), TARGET, CFG,
-                        d_initial=425.0, fuel_frac=0.0)
-    assert r == pytest.approx(CFG["reward"]["failure_max"])
+def test_high_hover_timeout_scores_zero():
+    """목표 고도에 도달하지 못하면 다른 조건이 완벽해도 0점이다."""
+    hovering = at(x=0.0, y=400.0, vx=0.0, vy=0.0)
+    r = terminal_reward(Outcome.TIMEOUT, hovering, TARGET, CFG, fuel_frac=1.0)
+    assert r == pytest.approx(0.0)
+
+
+def test_near_miss_scores_half_the_failure_maximum():
+    """임계값 정확히 위에서 실패하면 절반을 받는다."""
+    s = CFG["success"]
+    near = at(x=0.0, y=25.0, vy=-s["v_max"])
+    r = terminal_reward(Outcome.CRASH, near, TARGET, CFG, fuel_frac=0.5)
+    assert r == pytest.approx(CFG["reward"]["failure_max"] * 0.5)
+
+
+def test_weakest_criterion_determines_the_failure_score():
+    """다섯 조건 중 가장 나쁜 것이 점수를 정한다.
+
+    성공하려면 전부 만족해야 하므로 부분 점수도 가장 약한 고리를 따른다.
+    평균을 쓰면 '속도만 빼고 완벽'이 높은 점수를 받아 자유낙하가 되살아난다.
+    """
+    s = CFG["success"]
+    good = at(x=0.0, y=25.0, vy=-1.0)
+    bad_speed = at(x=0.0, y=25.0, vy=-2.0 * s["v_max"])
+    assert terminal_reward(Outcome.CRASH, good, TARGET, CFG, fuel_frac=0.0) > 0.0
+    assert terminal_reward(Outcome.CRASH, bad_speed, TARGET, CFG,
+                           fuel_frac=0.0) == pytest.approx(0.0)
+
+
+def test_potential_penalises_speed():
+    """Φ 가 속도를 반영해야 밀집 신호가 성공 기준을 가리킨다."""
+    assert potential(at(vy=-40.0), TARGET, CFG) < potential(at(vy=-1.0), TARGET, CFG)
+
+
+def test_potential_wraps_the_attitude_angle():
+    """여러 바퀴 돌아도 Φ 가 무한정 작아지지 않는다.
+
+    물리는 θ 를 감지 않는데 관찰은 sin/cos 라 감김 횟수를 볼 수 없다.
+    보상만 그것에 의존하면 관찰로 구분 불가능한 두 상태가 다른 값을 갖는다.
+    """
+    assert potential(at(theta=0.1), TARGET, CFG) == pytest.approx(
+        potential(at(theta=0.1 + 2.0 * math.pi), TARGET, CFG))
 
 
 def test_failure_reward_has_no_time_term():
@@ -107,9 +143,9 @@ def test_failure_reward_has_no_time_term():
     고득점이 되었다. 이 테스트가 그 회귀를 막는다.
     """
     early = terminal_reward(Outcome.CRASH, at(x=10.0, y=100.0, step=5),
-                            TARGET, CFG, d_initial=425.0, fuel_frac=0.9)
+                            TARGET, CFG, fuel_frac=0.9)
     late = terminal_reward(Outcome.CRASH, at(x=10.0, y=100.0, step=790),
-                           TARGET, CFG, d_initial=425.0, fuel_frac=0.1)
+                           TARGET, CFG, fuel_frac=0.1)
     assert early == pytest.approx(late)
 
 
@@ -120,8 +156,7 @@ def test_all_failure_outcomes_share_the_same_formula():
     """
     state = at(x=10.0, y=100.0)
     scores = [
-        terminal_reward(outcome, state, TARGET, CFG,
-                        d_initial=425.0, fuel_frac=0.5)
+        terminal_reward(outcome, state, TARGET, CFG, fuel_frac=0.5)
         for outcome in (Outcome.CRASH, Outcome.MISSED,
                         Outcome.TIMEOUT, Outcome.OUT_OF_FUEL)
     ]
@@ -137,31 +172,9 @@ def test_catch_profile_rewards_slow_contact_much_more_steeply():
         return terminal_reward(
             Outcome.SUCCESS,
             at(x=0.0, y=target[1], vy=-speed, step=0),
-            target, catch_cfg, d_initial=400.0, fuel_frac=1.0)
+            target, catch_cfg, fuel_frac=1.0)
 
     assert score(0.0) - score(1.0) > score(3.0) - score(4.0)
-
-
-def test_crash_without_progress_scores_zero_at_any_initial_distance():
-    """진행이 없으면 출발 거리와 무관하게 0점이다.
-
-    예전 구현은 분모를 max(d_initial, 1.0)으로 눌렀다. 그러면 목표
-    근처에서 출발했을 때 분모만 1.0으로 올라가고 분자는 작은 실제 거리라서,
-    제자리 추락에도 양수 점수가 나온다 — 이 모듈이 막으려는 바로 그
-    '빨리 자폭' 꼼수다. 현재 프리셋은 d_initial >= 370 이라 도달할 수
-    없지만, 저고도에서 시작하는 라운드를 새로 만들면 되살아난다.
-    """
-    for d in (0.5, 2.0, 425.0):
-        state = at(x=d, y=25.0)          # 목표에서 정확히 d 만큼 떨어진 지점
-        r = terminal_reward(Outcome.CRASH, state, TARGET, CFG,
-                            d_initial=d, fuel_frac=0.5)
-        assert r == pytest.approx(0.0)
-
-
-def test_zero_initial_distance_scores_zero():
-    r = terminal_reward(Outcome.CRASH, at(x=0.0, y=25.0), TARGET, CFG,
-                        d_initial=0.0, fuel_frac=0.0)
-    assert r == 0.0
 
 
 def test_shaping_reads_gamma_from_config():

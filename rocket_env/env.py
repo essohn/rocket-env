@@ -13,12 +13,7 @@ from gymnasium import spaces
 
 from rocket_env.config import build_config
 from rocket_env.physics import ACTION_TABLE, DT, PHI_MAX, fuel_cost, integrate
-from rocket_env.reward import (
-    distance_to_target,
-    potential,
-    shaping,
-    terminal_reward,
-)
+from rocket_env.reward import potential, shaping, terminal_reward
 from rocket_env.tasks import make_task
 from rocket_env.types import Outcome
 from rocket_env.wind import WindProcess
@@ -60,7 +55,6 @@ class RocketEnv(gym.Env):
 
         self.state = None
         self._target = self.task.target(self.cfg)
-        self._d_initial = 1.0
         self._potential = 0.0
         self._outcome = Outcome.IN_PROGRESS
 
@@ -76,7 +70,6 @@ class RocketEnv(gym.Env):
         self.state = replace(state, wind_x=wind_x)
 
         self._target = self.task.target(self.cfg)
-        self._d_initial = distance_to_target(self.state, self._target)
         self._potential = potential(self.state, self._target, self.cfg)
         self._outcome = Outcome.IN_PROGRESS
 
@@ -123,7 +116,7 @@ class RocketEnv(gym.Env):
         if outcome is not None:
             self._outcome = outcome
             reward += terminal_reward(outcome, cur, self._target, self.cfg,
-                                      self._d_initial, self._fuel_frac())
+                                      self._fuel_frac())
             if outcome != Outcome.TIMEOUT:
                 impact_speed = math.hypot(cur.vx, cur.vy)
 
