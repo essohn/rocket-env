@@ -44,8 +44,14 @@ def test_explicit_user_value_beats_catch_profile():
 
 
 def test_locked_key_raises_config_error():
+    """잠금 키는 '알 수 없는 키'가 아니라 잠금 전용 메시지로 거부되어야 한다.
+
+    잠금 키는 스키마에도 없으므로 두 검사의 순서가 뒤바뀌면 unknown-key
+    메시지가 나온다. `match=key` 로는 두 메시지 모두에 키 이름이 들어가
+    구별하지 못하므로, 잠금 메시지에만 있는 문구를 단언해 순서를 고정한다.
+    """
     for key in ("dt", "g", "H", "observation", "action"):
-        with pytest.raises(ConfigError, match=key):
+        with pytest.raises(ConfigError, match="환경 상수"):
             build_config({key: 1})
 
 
