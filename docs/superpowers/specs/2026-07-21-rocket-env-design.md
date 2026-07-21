@@ -138,22 +138,32 @@ class Task(Protocol):
 ### 적분 (semi-implicit Euler)
 
 ```
-ft = -f·sin(φ)                    # 노즐 접선 방향 성분
-fr =  f·cos(φ)                    # 노즐 축 방향 성분
-fx = ft·cos(θ) - fr·sin(θ)
-fy = ft·sin(θ) + fr·cos(θ)
+thrust_tangential = -f·sin(φ)     # 노즐이 기울어져 생기는 옆 방향 성분 → 토크를 만든다
+thrust_axial      =  f·cos(φ)     # 기체 축 방향 성분 → 기체를 밀어올린다
 
-ρ  = 1 / sqrt(125 / (g/2))        # ≈ 0.198, 125m 자유낙하 후 항력=mg가 되는 계수
+fx = thrust_tangential·cos(θ) - thrust_axial·sin(θ)
+fy = thrust_tangential·sin(θ) + thrust_axial·cos(θ)
+
+# 항력 계수는 종단속도를 설계값으로 두고 역산한다.
+# 무동력 낙하가 평형에 이르면 ρ·v_term = g 이므로:
+v_term = 49.5 m/s                 # 이 로켓이 무동력 낙하 시 도달하는 속도
+ρ      = g / v_term               # ≈ 0.198
 
 ax = fx - ρ·(vx - wind_x)         # 항력은 공기 기준 상대속도에 비례
 ay = fy - g - ρ·vy
-aω = ft·(H/2) / I
+aω = thrust_tangential·(H/2) / I  # = 6·thrust_tangential / H  (얇은 막대, I = H²/12)
 
 x += vx·dt + 0.5·ax·dt²   ;  vx += ax·dt
 y += vy·dt + 0.5·ay·dt²   ;  vy += ay·dt
 θ += ω·dt  + 0.5·aω·dt²   ;  ω  += aω·dt
 φ  = clip(φ + vφ·dt, -20°, +20°)
 ```
+
+**항력 계수를 종단속도에서 역산하는 이유.** 계수 자체는 물리 법칙이 정해주지 않는 **설계 선택**이므로,
+어떤 수로 표현하든 결국 누군가가 고른 값이다. 그렇다면 의미가 바로 읽히는 양으로 고르는 편이 낫다.
+"종단속도 49.5 m/s인 로켓"은 학생이 즉시 이해하고 검증할 수 있는 반면, 같은 값을 다른 경로로 유도하면
+숫자만 남고 의도가 사라진다. 테스트도 이 형태에서 더 강해진다 — 시뮬레이션이 **설계된** 종단속도에
+도달하는지 확인하는 독립적 검증이 되기 때문이다.
 
 **바람은 새 항이 아니라 기존 항력 항의 수정으로 들어간다.** 항력은 물리적으로 공기 기준 상대속도에
 비례해야 하는데 원래 모델은 지면 기준 속도를 썼다. `wind_x = 0`이면 원본과 정확히 일치하고,

@@ -57,7 +57,7 @@
   - `rocket_env.types.Outcome` — 상수 `IN_PROGRESS, SUCCESS, CRASH, MISSED, TIMEOUT, OUT_OF_FUEL`
   - `rocket_env.physics.integrate(state: State, thrust: float, nozzle_rate: float, wind_x: float) -> State`
   - `rocket_env.physics.fuel_cost(thrust: float) -> float`
-  - 상수 `G, DT, ROCKET_HEIGHT, MOMENT_OF_INERTIA, DRAG_RHO, PHI_MAX, ACTION_TABLE, WORLD_X_MIN, WORLD_X_MAX, WORLD_Y_MIN, WORLD_Y_MAX`
+  - 상수 `G, DT, ROCKET_HEIGHT, MOMENT_OF_INERTIA, TERMINAL_VELOCITY, DRAG_RHO, PHI_MAX, ACTION_TABLE, WORLD_X_MIN, WORLD_X_MAX, WORLD_Y_MIN, WORLD_Y_MAX`
 
 - [ ] **Step 1: 브랜치 생성과 개발 환경 준비**
 
@@ -131,11 +131,11 @@ import pytest
 
 from rocket_env.physics import (
     ACTION_TABLE,
-    DRAG_RHO,
     DT,
     G,
     PHI_MAX,
     ROCKET_HEIGHT,
+    TERMINAL_VELOCITY,
     fuel_cost,
     integrate,
 )
@@ -165,12 +165,16 @@ def test_single_freefall_step_matches_hand_computation():
     assert s.step == 1
 
 
-def test_terminal_velocity_converges_to_minus_g_over_rho():
-    """항력 계수는 종단속도가 약 -49.5 m/s가 되도록 정해져 있다."""
+def test_freefall_reaches_the_designed_terminal_velocity():
+    """시뮬레이션이 설계값 TERMINAL_VELOCITY에 실제로 도달하는지 본다.
+
+    DRAG_RHO를 종단속도에서 역산했으므로, 이 테스트는 계수 계산과 적분이
+    서로 맞물려 돌아가는지 확인하는 독립적 검증이 된다.
+    """
     s = make_state(y=100_000.0)
     for _ in range(2000):
         s = integrate(s, thrust=0.0, nozzle_rate=0.0, wind_x=0.0)
-    assert s.vy == pytest.approx(-G / DRAG_RHO, abs=0.01)
+    assert s.vy == pytest.approx(-TERMINAL_VELOCITY, abs=0.01)
 
 
 def test_drag_vanishes_when_moving_with_the_wind():
@@ -190,11 +194,17 @@ def test_upright_full_thrust_gives_net_upward_acceleration_of_g():
 
 
 def test_gimballed_thrust_produces_torque():
-    s = integrate(make_state(phi=math.radians(10.0)), thrust=G,
-                  nozzle_rate=0.0, wind_x=0.0)
-    ft = -G * math.sin(math.radians(10.0))
-    alpha = ft * (ROCKET_HEIGHT / 2.0) / (ROCKET_HEIGHT**2 / 12.0)
-    assert s.omega == pytest.approx(alpha * DT)
+    """얇은 막대(I = H^2/12)의 H/2 지점에 접선력이 걸리면 alpha = 6*ft/H 다.
+
+    프로덕션 코드와 다른 대수 경로로 유도했으므로 독립적인 오라클이다.
+    프로덕션 수식을 그대로 재계산하면 지렛대 길이나 관성모멘트를 함께
+    잘못 잡은 경우를 잡아낼 수 없다.
+    """
+    phi = math.radians(10.0)
+    s = integrate(make_state(phi=phi), thrust=G, nozzle_rate=0.0, wind_x=0.0)
+    thrust_tangential = -G * math.sin(phi)
+    expected_alpha = 6.0 * thrust_tangential / ROCKET_HEIGHT
+    assert s.omega == pytest.approx(expected_alpha * DT)
     assert s.omega < 0.0
 
 
@@ -287,9 +297,12 @@ ROCKET_HEIGHT = 50.0                       # 기체 길이 (m)
 MOMENT_OF_INERTIA = ROCKET_HEIGHT**2 / 12.0  # 얇은 막대의 관성모멘트 (단위질량)
 PHI_MAX = math.radians(20.0)               # 노즐 짐벌 한계 (rad)
 
-# 항력 계수. 125 m 자유낙하 후 항력이 중력과 같아지도록 정한 값이며,
-# 결과적으로 종단속도가 G / DRAG_RHO ~= 49.5 m/s 가 된다.
-DRAG_RHO = 1.0 / math.sqrt(125.0 / (G / 2.0))
+# 항력 계수는 종단속도를 설계값으로 두고 역산한다. 무동력 낙하가 평형에
+# 이르면 DRAG_RHO * v = G 이므로 DRAG_RHO = G / v_term.
+# 계수 자체는 물리 법칙이 정해주지 않는 설계 선택이므로, 의미가 바로 읽히는
+# 양(종단속도)으로 고르는 편이 학생에게도 검증하기 쉽다.
+TERMINAL_VELOCITY = 49.5                   # 무동력 낙하 종단속도 (m/s)
+DRAG_RHO = G / TERMINAL_VELOCITY
 
 # --- 세계 경계 ---
 WORLD_X_MIN, WORLD_X_MAX = -300.0, 300.0
@@ -315,23 +328,23 @@ def integrate(state: State, thrust: float, nozzle_rate: float,
               wind_x: float) -> State:
     """한 스텝 적분한 새 State를 반환한다.
 
-    힘 분해:
-        ft = -f·sin(phi)   노즐 접선 성분 (토크를 만든다)
-        fr =  f·cos(phi)   노즐 축 성분 (기체를 밀어올린다)
+    추력을 기체 기준 두 성분으로 나눈 뒤 세계 좌표로 회전시킨다.
+    접선 성분만 토크를 만들고, 축 성분만 기체를 밀어올린다.
 
     항력은 지면 기준 속도가 아니라 **공기 기준 상대속도**에 비례한다.
     바람이 새로운 힘 항이 아니라 기존 항력 항의 수정으로 들어가는 이유다.
     """
     theta, phi = state.theta, state.phi
 
-    ft = -thrust * math.sin(phi)
-    fr = thrust * math.cos(phi)
-    fx = ft * math.cos(theta) - fr * math.sin(theta)
-    fy = ft * math.sin(theta) + fr * math.cos(theta)
+    thrust_tangential = -thrust * math.sin(phi)   # 옆 방향 성분 → 토크
+    thrust_axial = thrust * math.cos(phi)         # 기체 축 방향 성분 → 추진
+
+    fx = thrust_tangential * math.cos(theta) - thrust_axial * math.sin(theta)
+    fy = thrust_tangential * math.sin(theta) + thrust_axial * math.cos(theta)
 
     ax = fx - DRAG_RHO * (state.vx - wind_x)
     ay = fy - G - DRAG_RHO * state.vy
-    alpha = ft * (ROCKET_HEIGHT / 2.0) / MOMENT_OF_INERTIA
+    alpha = thrust_tangential * (ROCKET_HEIGHT / 2.0) / MOMENT_OF_INERTIA
 
     return replace(
         state,
@@ -353,7 +366,7 @@ def integrate(state: State, thrust: float, nozzle_rate: float,
 uv run pytest tests/test_physics.py -v
 ```
 
-기대: 11 passed.
+기대: 10 passed.
 
 - [ ] **Step 9: 커밋**
 
