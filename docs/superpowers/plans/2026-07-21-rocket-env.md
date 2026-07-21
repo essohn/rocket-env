@@ -1391,6 +1391,36 @@ def test_hovering_below_the_arm_does_not_retrigger():
     assert TASK.evaluate(at(y=Y_ARM - 5.0), at(y=Y_ARM - 6.0), CFG) is None
 
 
+def test_crossing_exactly_at_arm_height_is_judged():
+    """`y_arm >= cur.y` 는 등호를 포함한다 — 정확히 팔 높이에 닿아도 판정한다.
+
+    다른 테스트는 전부 Y_ARM - 0.1 을 쓰므로 등호를 빼도(`>` 로 바꿔도)
+    모두 통과한다. 이 테스트가 그 한 칸을 고정한다.
+    """
+    prev, cur = at(y=Y_ARM + 1.0), at(y=Y_ARM, vy=-1.0)
+    assert TASK.evaluate(prev, cur, CFG) == Outcome.SUCCESS
+
+
+def test_starting_exactly_at_arm_height_is_not_a_crossing():
+    """`prev.y > y_arm` 은 strict 다 — 팔 높이에서 출발하면 통과가 아니다.
+
+    등호를 허용하면 팔 높이 부근에서 맴도는 로켓이 매 스텝 재판정된다.
+    """
+    prev, cur = at(y=Y_ARM, vy=-1.0), at(y=Y_ARM - 0.1, vy=-1.0)
+    assert TASK.evaluate(prev, cur, CFG) is None
+
+
+def test_step_that_reverses_to_upward_is_not_judged():
+    """`cur.vy < 0` 가드가 실제로 지키는 유일한 경우.
+
+    한 스텝의 순 변위는 아래쪽인데 끝 속도가 위로 뒤집힌 상태 — 팔 높이
+    부근에서 거의 멈췄다가 반등하는 순간이다. test_crossing_upward_is_not_judged
+    는 y 순서 조건만으로 이미 걸러져서 이 가드를 전혀 시험하지 못한다.
+    """
+    prev, cur = at(y=Y_ARM + 0.05, vy=-0.3), at(y=Y_ARM - 0.01, vy=+0.1)
+    assert TASK.evaluate(prev, cur, CFG) is None
+
+
 def test_reaching_the_ground_without_crossing_crashes():
     from rocket_env.tasks.base import GROUND_Y
     assert TASK.evaluate(at(y=GROUND_Y + 1.0),
@@ -1489,7 +1519,7 @@ def make_task(name: str) -> Task:
 uv run pytest tests/test_task_catch.py tests/test_task_landing.py -v
 ```
 
-기대: 28 passed.
+기대: 31 passed.
 
 - [ ] **Step 6: 커밋**
 
