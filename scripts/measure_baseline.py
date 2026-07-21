@@ -44,6 +44,9 @@ def main() -> None:
     parser.add_argument("--preset", default="landing-basic", choices=list(PRESETS))
     parser.add_argument("--steps", type=int, default=100_000)
     parser.add_argument("--lr", type=float, default=6e-4)
+    parser.add_argument(
+        "--seeds", type=int, default=3,
+        help="독립적인 학습 실행 횟수 — 학습 시드에 따른 편차를 재기 위함")
     args = parser.parse_args()
 
     env = gym.make("rocket-v0", config=PRESETS[args.preset])
@@ -55,18 +58,32 @@ def main() -> None:
 
     from stable_baselines3 import DQN
 
-    model = DQN("MlpPolicy", env, verbose=0, device="cpu",
-                learning_rate=args.lr, buffer_size=200_000,
-                learning_starts=5_000, policy_kwargs={"net_arch": [256, 256]})
-    model.learn(total_timesteps=args.steps)
-    dqn_score, dqn_rate = evaluate(
-        env, lambda obs: int(model.predict(obs, deterministic=True)[0]))
+    dqn_scores: list[float] = []
+    dqn_rates: list[float] = []
+    for train_seed in range(args.seeds):
+        model = DQN("MlpPolicy", env, verbose=0, device="cpu",
+                    learning_rate=args.lr, buffer_size=200_000,
+                    learning_starts=5_000, policy_kwargs={"net_arch": [256, 256]},
+                    seed=train_seed)
+        model.learn(total_timesteps=args.steps)
+        score, rate = evaluate(
+            env, lambda obs: int(model.predict(obs, deterministic=True)[0]))
+        dqn_scores.append(score)
+        dqn_rates.append(rate)
 
-    print(f"preset={args.preset} steps={args.steps} lr={args.lr}")
-    print(f"  no-op   score={noop_score:8.2f}  success={noop_rate:6.1%}")
-    print(f"  random  score={rand_score:8.2f}  success={rand_rate:6.1%}")
-    print(f"  DQN     score={dqn_score:8.2f}  success={dqn_rate:6.1%}")
-    print(f"  separation (DQN - no-op) = {dqn_score - noop_score:+.2f}")
+    mean_score = statistics.mean(dqn_scores)
+    mean_rate = statistics.mean(dqn_rates)
+
+    print(f"preset={args.preset} steps={args.steps} lr={args.lr} train_seeds={args.seeds}")
+    print(f"  no-op        score={noop_score:8.2f}  success={noop_rate:6.1%}")
+    print(f"  random       score={rand_score:8.2f}  success={rand_rate:6.1%}")
+    for i, (score, rate) in enumerate(zip(dqn_scores, dqn_rates)):
+        print(f"  DQN seed={i:<3} score={score:8.2f}  success={rate:6.1%}")
+    print(
+        f"  DQN mean     score={mean_score:8.2f}  success={mean_rate:6.1%}"
+        f"   (score min {min(dqn_scores):.2f}, max {max(dqn_scores):.2f})"
+    )
+    print(f"  separation (mean DQN - no-op) = {mean_score - noop_score:+.2f}")
     env.close()
 
 
