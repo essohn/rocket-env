@@ -2401,8 +2401,21 @@ FULL_UP = 10    # 추력 2.0g, 노즐 정지 — 위로 이탈
 
 SEEDS = range(12)
 
-# shaping 총합의 이론적 상한. Φ ∈ [-3.8, 0]이므로 |ΣF| ≤ 3.8.
-SHAPING_BOUND = 4.0
+# shaping 총합의 상한.
+#
+# shaping_gamma=1.0 이라 shaping 항은 정확히 Φ(s_T) - Φ(s_0) 로 접힌다.
+# Φ <= 0 이므로 Φ(s_T) 의 최대는 0이고, 따라서 총합의 상한은 -Φ(s_0) 다.
+# 즉 상한을 정하는 것은 중간 경로가 아니라 **초기 조건뿐**이다.
+# (도달 가능한 상태 전체에서 Φ 의 최소를 찾는 것은 다른 양이며, 그렇게
+#  계산하면 3.8 이 나오지만 그것은 이 상한과 무관하다.)
+#
+# 프리셋별 초기 분포에서 계산한 -Φ(s_0) 의 최악값:
+#   landing-easy   1.83    catch-normal  1.73
+#   landing-normal 2.17    catch-hard    2.07
+#   landing-hard   2.56  <- 최댓값
+# 여유를 두어 3.0 으로 잡는다. 4.0 은 실측 최대(약 0.54)의 7배라
+# 실제 회귀가 숨을 여지가 너무 컸다.
+SHAPING_BOUND = 3.0
 
 
 def rollout(config, action, seed):
@@ -2429,7 +2442,14 @@ def test_no_fixed_action_policy_ever_succeeds(preset, action):
 @pytest.mark.parametrize("action", [NOOP, HOVER, FULL_UP])
 @pytest.mark.parametrize("preset", list(PRESETS))
 def test_failure_returns_stay_under_the_failure_ceiling(preset, action):
-    """실패 에피소드 점수는 failure_max + shaping 상한을 넘을 수 없다."""
+    """실패 에피소드 점수는 failure_max + shaping 상한을 넘을 수 없다.
+
+    세 행동 모두 노즐을 고정하므로, 짐벌을 흔들거나 행동을 번갈아 쓰는
+    정책은 직접 시험하지 않는다. 그래도 이 상한은 그런 정책에도 유효하다 —
+    PBRS 텔레스코핑 때문에 shaping 총합이 Φ(s_T) - Φ(s_0) 로 결정되고
+    Φ(s_T) <= 0 이므로, 어떤 경로를 밟든 초기 조건이 정한 상한을 넘을 수
+    없기 때문이다. 경로가 아니라 끝점만이 점수를 정한다.
+    """
     cfg = build_config(PRESETS[preset])
     ceiling = cfg["reward"]["failure_max"] + SHAPING_BOUND
     for seed in SEEDS:
@@ -2490,7 +2510,7 @@ uv run pytest tests/test_exploit_regression.py -v
 ```
 
 기대: 전부 passed. 실패하면 **테스트가 아니라 보상 설계를 고친다.**
-특히 `test_crashing_early_is_not_rewarded_more_than_crashing_late`가 실패하면
+특히 `test_shorter_episodes_do_not_earn_more_than_longer_ones`가 실패하면
 `terminal_reward`의 실패 분기에 시간 의존성이 들어간 것이다.
 
 - [ ] **Step 3: 커밋**
