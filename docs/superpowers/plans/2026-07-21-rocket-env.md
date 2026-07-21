@@ -911,7 +911,7 @@ def validate_train_config(train_cfg: dict,
 uv run pytest tests/test_config.py -v
 ```
 
-기대: 17 passed (parametrize 5건 포함).
+기대: 18 passed (parametrize 5건 포함).
 
 - [ ] **Step 5: 커밋**
 
@@ -1189,7 +1189,7 @@ def make_task(name: str) -> Task:
 uv run pytest tests/test_task_landing.py -v
 ```
 
-기대: 13 passed.
+기대: 12 passed.
 
 - [ ] **Step 7: 커밋**
 
@@ -1398,7 +1398,7 @@ def make_task(name: str) -> Task:
 uv run pytest tests/test_task_catch.py tests/test_task_landing.py -v
 ```
 
-기대: 24 passed.
+기대: 23 passed.
 
 - [ ] **Step 6: 커밋**
 
