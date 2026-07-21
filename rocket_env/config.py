@@ -205,6 +205,13 @@ def _validate_ranges(cfg: dict) -> None:
         if value <= 0:
             raise ConfigError(f"success.{key}는 양수여야 합니다: {value}")
 
+    # v_ref 는 exp(-speed / v_ref) 의 분모다. 0이면 ZeroDivisionError,
+    # 음수면 속도가 빠를수록 점수가 오르도록 부호가 뒤집힌다.
+    if cfg["reward"]["v_ref"] <= 0:
+        raise ConfigError(
+            f"reward.v_ref는 양수여야 합니다: {cfg['reward']['v_ref']}"
+        )
+
 
 def validate_train_config(train_cfg: dict,
                           eval_cfg: dict) -> tuple[bool, list[str], list[str]]:

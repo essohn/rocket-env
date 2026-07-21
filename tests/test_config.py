@@ -70,6 +70,11 @@ def test_negative_fuel_capacity_raises_config_error():
         build_config({"fuel": {"capacity": -1.0}})
 
 
+def test_non_positive_v_ref_raises_config_error():
+    with pytest.raises(ConfigError, match="v_ref"):
+        build_config({"reward": {"v_ref": 0.0}})
+
+
 def test_none_fuel_capacity_is_allowed():
     assert build_config({"fuel": {"capacity": None}})["fuel"]["capacity"] is None
 
