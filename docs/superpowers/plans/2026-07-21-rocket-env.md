@@ -2554,7 +2554,8 @@ EOF
 """렌더링 smoke 테스트.
 
 픽셀 값을 검증하지는 않는다. 크래시 없이 올바른 형태의 배열이 나오는지,
-두 태스크와 모든 종료 상태에서 그려지는지만 본다.
+두 태스크와 모든 종료 상태에서 그려지는지를 본다. 다만 학생이 오해할 수
+있는 두 지점 — 포획 창 폭과 렌더러 여러 개의 수명 — 은 따로 고정한다.
 """
 
 import os
@@ -2607,6 +2608,31 @@ def test_every_outcome_banner_draws(outcome):
     frame = renderer.draw(a_state(cfg), (0.0, 25.0), outcome)
     assert frame.shape == (HEIGHT, WIDTH, 3)
     renderer.close()
+
+
+def test_catch_capture_window_matches_the_success_threshold():
+    """그려지는 포획 창은 실제 판정 범위와 정확히 같아야 한다.
+
+    팔 구조물은 보이도록 넓게 그리지만, 판정 범위를 따로 표시하지 않으면
+    학생은 팔 안쪽으로 지나갔는데 MISSED 가 뜨는 이유를 알 수 없다.
+    """
+    cfg = build_config(PRESETS["catch-normal"])
+    renderer = Renderer(cfg, "rgb_array")
+    _, _, arm_half, window_half = renderer._catch_geometry((0.0, 80.0))
+    assert window_half == cfg["success"]["zone_r"]
+    assert arm_half > window_half
+    renderer.close()
+
+
+def test_closing_one_renderer_does_not_break_another():
+    """close() 가 pygame 을 전역 종료하면 살아 있는 다른 렌더러가 깨진다."""
+    cfg = build_config(PRESETS["landing-normal"])
+    first = Renderer(cfg, "rgb_array")
+    second = Renderer(cfg, "rgb_array")
+    first.close()
+    frame = second.draw(a_state(cfg), (0.0, 25.0), Outcome.IN_PROGRESS)
+    assert frame.shape == (HEIGHT, WIDTH, 3)
+    second.close()
 
 
 def test_render_returns_none_when_render_mode_is_none():
@@ -2731,7 +2757,13 @@ class Renderer:
         return np.transpose(pygame.surfarray.array3d(self.surface), (1, 0, 2))
 
     def close(self) -> None:
-        pygame.quit()
+        """디스플레이만 닫는다.
+
+        pygame.quit() 은 프로세스 전역이다. 노트북에서 렌더링 환경을 둘
+        이상 띄워둔 채 하나를 닫으면 나머지의 폰트와 서피스까지 무효가 된다.
+        """
+        if self.render_mode == "human":
+            pygame.display.quit()
 
     # --- 좌표 변환 ---
 
@@ -2762,15 +2794,32 @@ class Renderer:
             pygame.draw.line(self.surface, PAD_COLOR, left, right, 6)
             return
 
-        x_tower = self.cfg["catch"]["x_tower"]
-        y_arm = self.cfg["catch"]["y_arm"]
-        zone_r = self.cfg["success"]["zone_r"]
+        x_tower, y_arm, arm_half, window_half = self._catch_geometry(target)
         base = self._to_px(x_tower, 0.0)
         top = self._to_px(x_tower, y_arm * 1.25)
         pygame.draw.line(self.surface, TOWER_COLOR, base, top, 8)
-        left = self._to_px(x_tower - zone_r * 3.0, y_arm)
-        right = self._to_px(x_tower + zone_r * 3.0, y_arm)
-        pygame.draw.line(self.surface, ARM_COLOR, left, right, 7)
+
+        # 팔 구조물. 포획 창보다 넓게 그린다 — 6 m 는 화면에서 13 px 밖에
+        # 안 돼서 구조물로 알아보기 어렵다.
+        pygame.draw.line(self.surface, TOWER_COLOR,
+                         self._to_px(x_tower - arm_half, y_arm),
+                         self._to_px(x_tower + arm_half, y_arm), 7)
+        # 실제 포획 판정 범위(±zone_r). 이걸 따로 그리지 않으면 학생은
+        # 팔 안쪽으로 잘 지나간 것처럼 보이는데 MISSED 가 뜨는 이유를
+        # 알 수 없다. 디버깅하라고 만든 그림이 디버깅을 방해하게 된다.
+        pygame.draw.line(self.surface, ARM_COLOR,
+                         self._to_px(x_tower - window_half, y_arm),
+                         self._to_px(x_tower + window_half, y_arm), 11)
+
+    def _catch_geometry(self, target: tuple[float, float]):
+        """타워 x, 팔 높이, 팔 반폭, 실제 포획 창 반폭을 돌려준다.
+
+        구조물 폭과 판정 폭을 한곳에서 분리해 두어야, 렌더러가 임계값을
+        잘못 그리는 일이 생기지 않고 테스트로 고정할 수도 있다.
+        """
+        x_tower, y_arm = target
+        window_half = self.cfg["success"]["zone_r"]
+        return x_tower, y_arm, max(window_half * 3.0, 18.0), window_half
 
     def _trail(self) -> None:
         if len(self.trail) < 2:
@@ -2800,7 +2849,8 @@ class Renderer:
             return
         length = 6.0 + 22.0 * (state.thrust / (2.0 * G))
         nozzle = (0.0, -ROCKET_HEIGHT / 2.0)
-        tip = (length * math.sin(state.phi), -ROCKET_HEIGHT / 2.0 - length)
+        tip = (length * math.sin(state.phi),
+               -ROCKET_HEIGHT / 2.0 - length * math.cos(state.phi))
         color = (255, 210, 90) if state.thrust < 1.5 * G else (255, 140, 60)
         points = [
             self._body_to_px(state, nozzle[0] - 3.0, nozzle[1]),
@@ -2846,7 +2896,7 @@ class Renderer:
 SDL_VIDEODRIVER=dummy uv run pytest tests/test_render.py -v
 ```
 
-기대: 12 passed (parametrize 포함).
+기대: 14 passed (parametrize 포함).
 
 - [ ] **Step 5: 전체 테스트 실행**
 
