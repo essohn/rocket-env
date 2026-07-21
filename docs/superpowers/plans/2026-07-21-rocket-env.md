@@ -3609,6 +3609,96 @@ uv run python scripts/measure_baseline.py --preset landing-normal --steps 100000
 
 ---
 
+### Task 13: 타임아웃은 0점 — 맴돌기 꼼수 차단
+
+**배경.** Task 12 가 `landing-easy` 의 초기 고도를 200 m 로 낮추자
+`test_loitering_does_not_out_score_descending` 이 12 시드 전부에서 깨졌다.
+1.0g 정지 추력 정책이 착륙 지점 근처 상태로 수렴한 채 타임아웃하면서,
+근접도 공식에서 6.74 점을 받았다 — 추락한 무추력 정책(0.38)보다 높다.
+
+원인은 `TIMEOUT` 을 다른 실패와 같은 공식으로 채점한 것이다. 추락은
+"착륙을 시도하다 실패"지만 타임아웃은 "시도조차 하지 않음"이다. 근접도로
+채점하면 **안전하게 맴도는 것이 위험을 감수하고 착륙을 시도하는 것보다
+높은 점수**를 받고, 최적 전략은 "절대 착륙하지 않기"가 된다.
+
+**Files:** `rocket_env/reward.py`, `tests/test_reward.py`
+
+- [ ] **Step 1: 실패하는 테스트 작성**
+
+`tests/test_reward.py` 의 `test_all_failure_outcomes_share_the_same_formula`
+를 아래 두 테스트로 교체한다.
+
+```python
+def test_contact_failures_share_the_same_formula():
+    """접지·포획실패·연료소진은 같은 공식을 쓴다."""
+    state = at(x=10.0, y=100.0)
+    scores = [terminal_reward(o, state, TARGET, CFG, fuel_frac=0.5)
+              for o in (Outcome.CRASH, Outcome.MISSED, Outcome.OUT_OF_FUEL)]
+    assert len(set(scores)) == 1
+    assert 0.0 <= scores[0] <= CFG["reward"]["failure_max"]
+
+
+def test_timeout_scores_zero_even_in_a_near_perfect_state():
+    """시도하지 않으면 0점이다.
+
+    목표 바로 위에서 거의 멈춘 상태라도 착륙하지 않았으면 0점이다.
+    맴도는 쪽이 착륙을 시도하다 실패하는 쪽보다 높은 점수를 받으면
+    최적 전략이 '절대 착륙하지 않기'가 되기 때문이다. 실제로
+    landing-easy 의 고도를 낮추자 1.0g 정지 추력 정책이 정확히 그
+    상태로 수렴했다.
+    """
+    almost = at(x=0.0, y=26.0, vx=0.0, vy=-0.5)
+    assert terminal_reward(Outcome.TIMEOUT, almost, TARGET, CFG,
+                           fuel_frac=1.0) == 0.0
+```
+
+- [ ] **Step 2: 테스트 실패 확인**
+
+```bash
+SDL_VIDEODRIVER=dummy uv run pytest tests/test_reward.py -v
+```
+
+- [ ] **Step 3: `rocket_env/reward.py` 수정**
+
+`_FAILURE_OUTCOMES` 를 접지 계열만 담도록 좁히고, 타임아웃 분기를 앞에 둔다.
+
+```python
+# 판정 지점에 실제로 도달한 실패. 부분 점수를 받는다.
+_CONTACT_FAILURES = frozenset({
+    Outcome.CRASH, Outcome.MISSED, Outcome.OUT_OF_FUEL,
+})
+```
+
+`terminal_reward` 의 실패 처리 앞에 추가한다.
+
+```python
+    if outcome == Outcome.TIMEOUT:
+        # 시간이 다 되도록 판정 지점에 가지 않았다면 시도 자체를 하지 않은
+        # 것이다. 목표 근처에서 맴도는 쪽이 착륙을 시도하다 실패하는 쪽보다
+        # 높은 점수를 받으면, 최적 전략은 "절대 착륙하지 않기"가 된다.
+        return 0.0
+```
+
+그리고 근접도 분기의 조건을 `if outcome in _CONTACT_FAILURES:` 로 바꾼다.
+
+- [ ] **Step 4: 전체 테스트**
+
+```bash
+SDL_VIDEODRIVER=dummy uv run pytest -v
+```
+
+`test_loitering_does_not_out_score_descending` 이 통과해야 한다. 다른
+exploit 회귀 테스트가 새로 깨지면 **상수를 만지지 말고 보고한다.**
+
+- [ ] **Step 5: 커밋**
+
+```bash
+git add rocket_env/ tests/
+git commit -m "fix: 타임아웃은 0점 — 맴돌기가 착륙 시도를 이기지 못하게"
+```
+
+---
+
 ## 완료 기준
 
 - [ ] `SDL_VIDEODRIVER=dummy uv run pytest -v` 전부 통과
