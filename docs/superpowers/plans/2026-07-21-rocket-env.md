@@ -1886,6 +1886,8 @@ EOF
 
 import math
 
+from dataclasses import replace
+
 import gymnasium as gym
 import numpy as np
 import pytest
@@ -1894,6 +1896,7 @@ from gymnasium.utils.env_checker import check_env
 import rocket_env  # noqa: F401  — 환경 등록 트리거
 from rocket_env.config import PRESETS
 from rocket_env.env import OBS_DIM, RocketEnv
+from rocket_env.reward import potential
 from rocket_env.types import Outcome
 
 NOOP = 1        # 추력 0, 노즐 정지
@@ -2026,6 +2029,61 @@ def test_wind_disabled_config_keeps_wind_at_zero():
         assert info["wind_x"] == 0.0
         if terminated or truncated:
             break
+
+
+def test_step_reward_matches_hand_computed_shaping():
+    """스텝 보상이 실제로 Φ 변화를 반영하는지 수치로 확인한다.
+
+    _potential 을 읽기 전에 덮어쓰면 shaping 이 매 스텝 정확히 0이 되는데,
+    나머지 테스트는 전부 통과한다 — 아무도 보상값을 보지 않기 때문이다.
+    추력 0인 NOOP 을 써서 연료 패널티 항을 0으로 만들고 shaping 만 남긴다.
+    """
+    env = RocketEnv(config=PRESETS["landing-easy"])
+    env.reset(seed=0)
+    inner = env.unwrapped
+    before = potential(inner.state, inner._target, inner.cfg)
+
+    _, reward, _, _, _ = env.step(NOOP)
+
+    after = potential(inner.state, inner._target, inner.cfg)
+    gamma = inner.cfg["reward"]["shaping_gamma"]
+    assert reward == pytest.approx(gamma * after - before)
+    assert reward != 0.0
+
+
+def test_observation_places_sin_and_cos_in_the_right_slots():
+    """자세 30도면 sin=0.5, cos=0.866 으로 값이 뚜렷이 달라 뒤바뀜이 드러난다."""
+    env = RocketEnv(config=PRESETS["landing-normal"])
+    env.reset(seed=0)
+    inner = env.unwrapped
+    inner.state = replace(inner.state, theta=math.radians(30.0))
+    obs = inner._observation()
+    assert obs[4] == pytest.approx(0.5, abs=1e-6)
+    assert obs[5] == pytest.approx(math.sqrt(3.0) / 2.0, abs=1e-6)
+
+
+def test_observation_uses_distinct_scales_for_position_and_velocity():
+    """위치와 속도를 같은 상수로 나누면 물리적으로 다른 양이 같은 값이 된다."""
+    env = RocketEnv(config=PRESETS["landing-normal"])
+    env.reset(seed=0)
+    inner = env.unwrapped
+    tx, ty = inner._target
+    inner.state = replace(inner.state, x=tx + 150.0, y=ty, vx=25.0, vy=0.0)
+    obs = inner._observation()
+    assert obs[0] == pytest.approx(0.5)    # 150 / 300
+    assert obs[1] == pytest.approx(0.0)
+    assert obs[2] == pytest.approx(0.5)    # 25 / 50
+    assert obs[3] == pytest.approx(0.0)
+
+
+def test_observation_reports_time_and_wind_fractions():
+    env = RocketEnv(config={**PRESETS["landing-normal"], "max_steps": 100})
+    env.reset(seed=0)
+    inner = env.unwrapped
+    inner.state = replace(inner.state, step=25, wind_x=10.0)
+    obs = inner._observation()
+    assert obs[9] == pytest.approx(0.5)     # 10 / 20
+    assert obs[10] == pytest.approx(0.25)   # 25 / 100
 
 
 def test_catch_task_can_be_selected_by_config():
@@ -2277,7 +2335,7 @@ register(id="rocket-catch-v0", entry_point="rocket_env:_make_catch",
 uv run pytest tests/test_env.py -v
 ```
 
-기대: 16 passed.
+기대: 20 passed.
 
 - [ ] **Step 6: 전체 테스트 실행**
 
