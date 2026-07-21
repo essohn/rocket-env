@@ -3831,6 +3831,219 @@ done
 
 ---
 
+### Task 15: 최종 리뷰 잔여 항목 정리
+
+전체 브랜치 리뷰가 남긴 Important 2건과 Minor 3건, 그리고 스펙-코드 드리프트를
+정리한다. 보상·물리는 건드리지 않는다.
+
+**Files:** `rocket_env/config.py`, `tests/test_config.py`, `tests/test_sb3_smoke.py`,
+`docs/superpowers/specs/2026-07-21-rocket-env-design.md`
+
+- [ ] **Step 1: `wind.mode` 를 실제 동작에 반영** (Important)
+
+`WindProcess` 는 분기 없는 단일 수식이라 `mode` 를 읽지 않는다. 그래서
+`{"wind": {"mode": "none"}}` 만 넘기면 `max_speed` 기본값 8.0 이 남아 바람이
+분다. 학생은 무풍에서 디버깅한다고 믿으며 8 m/s 에서 학습하고, 조교는 돌풍
+라운드를 만들었다고 믿으며 상수 바람으로 채점한다. 조용해서 아무도 모른다.
+
+`rocket_env/config.py` 에 추가하고 `build_config` 의 병합 직후·`_validate_ranges`
+직전에 호출한다.
+
+```python
+def _normalize_wind(cfg: dict) -> None:
+    """mode 가 실제 동작을 결정하도록 동반 값을 맞춘다.
+
+    WindProcess 는 mode 를 읽지 않고 max_speed/ou_theta/ou_sigma 만 본다.
+    여기서 맞춰주지 않으면 mode 는 장식일 뿐이고, 오설정이 조용히 통과한다.
+    """
+    wind = cfg["wind"]
+    if wind["mode"] == "none":
+        wind["max_speed"] = 0.0
+        wind["ou_theta"] = 0.0
+        wind["ou_sigma"] = 0.0
+    elif wind["mode"] == "constant":
+        wind["ou_theta"] = 0.0
+        wind["ou_sigma"] = 0.0
+    elif wind["mode"] == "gust" and wind["ou_sigma"] <= 0.0:
+        raise ConfigError(
+            "wind.mode='gust' 인데 ou_sigma 가 0 이하입니다 — 돌풍이 아니라 "
+            f"상수 바람이 됩니다: ou_sigma={wind['ou_sigma']}"
+        )
+```
+
+테스트:
+
+```python
+def test_wind_mode_none_forces_zero_wind():
+    """max_speed 를 함께 지정하지 않아도 mode 만으로 무풍이 되어야 한다."""
+    cfg = build_config({"wind": {"mode": "none"}})
+    assert cfg["wind"]["max_speed"] == 0.0
+
+
+def test_wind_mode_constant_clears_the_ou_terms():
+    cfg = build_config({"wind": {"mode": "constant", "max_speed": 5.0,
+                                 "ou_sigma": 3.0}})
+    assert cfg["wind"]["ou_sigma"] == 0.0
+
+
+def test_gust_without_sigma_raises_config_error():
+    with pytest.raises(ConfigError, match="ou_sigma"):
+        build_config({"wind": {"mode": "gust", "max_speed": 10.0}})
+```
+
+- [ ] **Step 2: `init.*` 와 `catch.*` 검증** (Minor)
+
+`init.y = 900` 이 지금은 통과해 1스텝 에피소드가 되고, `vy_range` 에 스칼라를
+넣으면 NumPy 가 날것의 `TypeError` 를 던진다.
+
+`rocket_env/config.py` 상단에 물리 상수를 import 한다 (physics 는 config 를
+import 하지 않으므로 순환이 없다).
+
+```python
+from rocket_env.physics import ROCKET_HEIGHT, WORLD_X_MAX, WORLD_X_MIN, WORLD_Y_MAX
+```
+
+`_validate_ranges` 에 추가한다.
+
+```python
+    ground = ROCKET_HEIGHT / 2.0
+    ceiling = WORLD_Y_MAX - ROCKET_HEIGHT / 2.0
+
+    init = cfg["init"]
+    if not ground < init["y"] < ceiling:
+        raise ConfigError(
+            f"init.y는 {ground}와 {ceiling} 사이여야 합니다: {init['y']}")
+    for key in ("x_range", "vy_range", "theta_range_deg"):
+        pair = init[key]
+        if not (isinstance(pair, (list, tuple)) and len(pair) == 2
+                and pair[0] <= pair[1]):
+            raise ConfigError(
+                f"init.{key}는 [최솟값, 최댓값] 2원소여야 합니다: {pair!r}")
+    if not (WORLD_X_MIN < init["x_range"][0]
+            and init["x_range"][1] < WORLD_X_MAX):
+        raise ConfigError(f"init.x_range가 세계 경계를 벗어납니다: {init['x_range']}")
+    if not ground < cfg["catch"]["y_arm"] < ceiling:
+        raise ConfigError(
+            f"catch.y_arm은 {ground}와 {ceiling} 사이여야 합니다: "
+            f"{cfg['catch']['y_arm']}")
+```
+
+테스트: `init.y = 900`, `vy_range = -50.0`(스칼라), `x_range = [-400, 400]`,
+`catch.y_arm = 900` 각각 `ConfigError` 를 내는지 확인한다. 여섯 프리셋이
+모두 여전히 빌드되는지도 확인한다.
+
+- [ ] **Step 3: `_reject_unknown_keys` 에 형태 검사 추가** (Minor)
+
+지금은 키 이름만 본다. `{"max_steps": "800"}` 이나 `{"seed": {"typo": 1}}` 이
+통과해 나중에 날것의 `TypeError` 로 터진다.
+
+```python
+def _kind(value) -> str:
+    if isinstance(value, dict):
+        return "dict"
+    if isinstance(value, (list, tuple)):
+        return "list"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, str):
+        return "str"
+    return "none"
+```
+
+`_reject_unknown_keys` 의 키 검사 다음에 넣는다. 스키마 값이 `None` 인 키
+(`seed`, `fuel.capacity` 는 기본이 숫자지만 `None` 허용)는 예외로 둔다.
+
+```python
+        expected = schema[key]
+        if _kind(expected) != "none" and _kind(value) not in (_kind(expected), "none"):
+            raise ConfigError(
+                f"{full!r} 의 형태가 스키마와 다릅니다: "
+                f"{_kind(value)} (스키마는 {_kind(expected)})")
+```
+
+테스트: `{"max_steps": "800"}` 과 `{"seed": {"typo": 1}}` 이 `ConfigError` 를
+내는지, `{"fuel": {"capacity": None}}` 은 여전히 통과하는지 확인한다.
+
+- [ ] **Step 4: 채점 경로 테스트** (Important)
+
+`tests/test_sb3_smoke.py` 의 두 테스트를 하나로 합친다. 지금은 `predict()` 를
+한 번만 호출하고, 전체 에피소드는 무작위 행동으로 돌린다. 서버 워커가 실제로
+쓰는 조합 — 저장된 모델을 불러와 `predict()` 출력을 그대로 `step()` 에 넣고
+점수를 누적 — 은 아무도 시험하지 않는다. `int(np.array([5]))` 는 NumPy 2.x 에서
+`TypeError` 라, `predict` 반환 형태가 바뀌면 전 학생의 제출이 채점 시점에 깨진다.
+
+```python
+@pytest.mark.slow
+def test_saved_model_drives_the_full_grading_loop(tmp_path):
+    """서버 워커가 실제로 밟는 경로를 그대로 시험한다.
+
+    저장 → 로드 → predict() 출력을 그대로 step() 에 전달 → 점수 누적.
+    """
+    env = gym.make("rocket-v0", render_mode="rgb_array",
+                   config=PRESETS["landing-basic"])
+    model = DQN("MlpPolicy", env, verbose=0, device="cpu", seed=0,
+                learning_starts=200, buffer_size=5_000,
+                policy_kwargs={"net_arch": [64, 64]})
+    model.learn(total_timesteps=2_000)
+    path = tmp_path / "model.zip"
+    model.save(path)
+    loaded = DQN.load(path, env=env, device="cpu")
+
+    scores, outcomes = [], []
+    for i in range(2):
+        obs, _ = env.reset(seed=1000 + i)
+        done = truncated = False
+        score = 0.0
+        info = {}
+        while not (done or truncated):
+            action, _ = loaded.predict(obs, deterministic=True)
+            obs, reward, done, truncated, info = env.step(action)
+            score += float(reward)
+        assert math.isfinite(score)
+        scores.append(score)
+        outcomes.append(bool(info["is_success"]))
+
+    assert len(scores) == 2
+    assert all(isinstance(o, bool) for o in outcomes)
+    env.close()
+```
+
+기존 `test_dqn_trains_and_predicts_without_error` 와
+`test_server_evaluation_loop_shape_works` 는 이것으로 대체한다.
+
+- [ ] **Step 5: 전체 테스트**
+
+```bash
+SDL_VIDEODRIVER=dummy uv run pytest -v
+```
+
+- [ ] **Step 6: 스펙을 코드에 맞춘다**
+
+`docs/superpowers/specs/2026-07-21-rocket-env-design.md` 에서 코드와 어긋난
+곳을 고친다. **코드가 옳고 스펙이 낡았다.**
+
+- 4절 파일 트리에 `types.py`, `reward.py`, `tasks/__init__.py` 추가
+- 6절 노즐 각속도 `±30°/s` → `±120°/s`
+- 7절 경계 이탈 조건 `|x| > 300` → `|x| >= 300`
+- 7절 `outcome` 우선순위: 실제 코드는 `CRASH` 만 `OUT_OF_FUEL` 로 승격한다
+  (`TIMEOUT` 을 승격하면 `truncated` 의미가 깨지므로 코드가 옳다)
+- 8절: 실패 보상이 `max(d_initial, 1.0)` 진행도가 아니라 **성공 조건 근접도의
+  최솟값**임을 반영. `TIMEOUT` 은 0점임을 명시
+- 8절 Φ 범위: 속도 항과 θ 래핑이 들어갔으므로 `SHAPING_BOUND = 4.0` 과
+  프리셋별 `-Φ(s₀)` 표로 갱신
+- 9절 프리셋 표를 6라운드 사다리로 교체
+- 10절: 궤적은 페이드하지 않고 400점으로 잘린다, HUD 는 게이지·화살표가
+  아니라 텍스트다 — 실제 구현에 맞춰 서술 수정
+- 11절 테스트 8번: 실제로는 수치 오라클이 없다는 점을 반영
+- 12절에 `info["fuel_left"]` 가 무한 연료에서 `inf` 라 JSON 비표준이라는
+  점을 SDK/리더보드 스펙에서 다룰 항목으로 명시
+
+- [ ] **Step 7: 커밋**
+
+---
+
 ## 완료 기준
 
 - [ ] `SDL_VIDEODRIVER=dummy uv run pytest -v` 전부 통과
