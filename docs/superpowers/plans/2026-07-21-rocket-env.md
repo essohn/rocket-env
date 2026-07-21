@@ -642,6 +642,11 @@ def test_negative_fuel_capacity_raises_config_error():
         build_config({"fuel": {"capacity": -1.0}})
 
 
+def test_non_positive_v_ref_raises_config_error():
+    with pytest.raises(ConfigError, match="v_ref"):
+        build_config({"reward": {"v_ref": 0.0}})
+
+
 def test_none_fuel_capacity_is_allowed():
     assert build_config({"fuel": {"capacity": None}})["fuel"]["capacity"] is None
 
@@ -939,6 +944,13 @@ def _validate_ranges(cfg: dict) -> None:
         if value <= 0:
             raise ConfigError(f"success.{key}는 양수여야 합니다: {value}")
 
+    # v_ref 는 exp(-speed / v_ref) 의 분모다. 0이면 ZeroDivisionError,
+    # 음수면 속도가 빠를수록 점수가 오르도록 부호가 뒤집힌다.
+    if cfg["reward"]["v_ref"] <= 0:
+        raise ConfigError(
+            f"reward.v_ref는 양수여야 합니다: {cfg['reward']['v_ref']}"
+        )
+
 
 def validate_train_config(train_cfg: dict,
                           eval_cfg: dict) -> tuple[bool, list[str], list[str]]:
@@ -975,7 +987,7 @@ def validate_train_config(train_cfg: dict,
 uv run pytest tests/test_config.py -v
 ```
 
-기대: 32 passed (parametrize 5 + 12건 포함).
+기대: 33 passed (parametrize 5 + 12건 포함).
 
 - [ ] **Step 5: 커밋**
 
@@ -1678,13 +1690,20 @@ def test_failure_reward_has_no_time_term():
     assert early == pytest.approx(late)
 
 
-@pytest.mark.parametrize("outcome", [
-    Outcome.CRASH, Outcome.MISSED, Outcome.TIMEOUT, Outcome.OUT_OF_FUEL,
-])
-def test_all_failure_outcomes_share_the_same_formula(outcome):
-    r = terminal_reward(outcome, at(x=10.0, y=100.0), TARGET, CFG,
+def test_all_failure_outcomes_share_the_same_formula():
+    """네 가지 실패는 동일한 값을 내야 한다.
+
+    각각 범위 안에 있는지만 보면, MISSED 에만 다른 공식이 붙어도 통과한다.
+    """
+    state = at(x=10.0, y=100.0)
+    scores = [
+        terminal_reward(outcome, state, TARGET, CFG,
                         d_initial=425.0, fuel_frac=0.5)
-    assert 0.0 <= r <= CFG["reward"]["failure_max"]
+        for outcome in (Outcome.CRASH, Outcome.MISSED,
+                        Outcome.TIMEOUT, Outcome.OUT_OF_FUEL)
+    ]
+    assert len(set(scores)) == 1
+    assert 0.0 <= scores[0] <= CFG["reward"]["failure_max"]
 
 
 def test_catch_profile_rewards_slow_contact_much_more_steeply():
@@ -1700,10 +1719,36 @@ def test_catch_profile_rewards_slow_contact_much_more_steeply():
     assert score(0.0) - score(1.0) > score(3.0) - score(4.0)
 
 
-def test_zero_initial_distance_does_not_divide_by_zero():
+def test_crash_without_progress_scores_zero_at_any_initial_distance():
+    """진행이 없으면 출발 거리와 무관하게 0점이다.
+
+    예전 구현은 분모를 max(d_initial, 1.0)으로 눌렀다. 그러면 목표
+    근처에서 출발했을 때 분모만 1.0으로 올라가고 분자는 작은 실제 거리라서,
+    제자리 추락에도 양수 점수가 나온다 — 이 모듈이 막으려는 바로 그
+    '빨리 자폭' 꼼수다. 현재 프리셋은 d_initial >= 370 이라 도달할 수
+    없지만, 저고도에서 시작하는 라운드를 새로 만들면 되살아난다.
+    """
+    for d in (0.5, 2.0, 425.0):
+        state = at(x=d, y=25.0)          # 목표에서 정확히 d 만큼 떨어진 지점
+        r = terminal_reward(Outcome.CRASH, state, TARGET, CFG,
+                            d_initial=d, fuel_frac=0.5)
+        assert r == pytest.approx(0.0)
+
+
+def test_zero_initial_distance_scores_zero():
     r = terminal_reward(Outcome.CRASH, at(x=0.0, y=25.0), TARGET, CFG,
                         d_initial=0.0, fuel_frac=0.0)
-    assert math.isfinite(r)
+    assert r == 0.0
+
+
+def test_shaping_reads_gamma_from_config():
+    """shaping 이 cfg 의 감가율을 실제로 읽는지 확인한다.
+
+    gamma 를 1.0으로 하드코딩한 구현도 기본 설정에서는 텔레스코핑
+    테스트를 전부 통과한다. 다른 값을 넣어야 비로소 드러난다.
+    """
+    cfg = build_config({"reward": {"shaping_gamma": 0.5}})
+    assert shaping(-2.0, -1.0, cfg) == pytest.approx(0.5 * -1.0 - (-2.0))
 ```
 
 - [ ] **Step 2: 테스트 실패 확인**
@@ -1721,9 +1766,11 @@ uv run pytest tests/test_reward.py -v
 
 두 부분으로 나뉜다.
 
-1. 스텝 보상 — 잠재함수 기반 shaping(PBRS) + 연료 패널티.
+1. 스텝 보상 — 잠재함수 기반 shaping(PBRS).
    shaping_gamma=1.0이면 shaping 총합이 정확히 Φ(s_T) - Φ(s_0)로 접히므로,
    에피소드가 길다고 점수가 쌓이지 않는다.
+   연료 패널티(cfg["reward"]["fuel_penalty"])는 실제 소모량을 아는
+   env.step()에서 더한다. 이 모듈은 소모량을 모른다.
 
 2. 종료 보상 — 성공은 기본점 + 품질 보너스, 실패는 목표를 향한 '진행도'.
    실패 보상에 시간 항이 전혀 없다는 점이 중요하다. 원본 환경은 실패에도
@@ -1781,7 +1828,10 @@ def terminal_reward(outcome: str, state: State, target: tuple[float, float],
 
     if outcome in _FAILURE_OUTCOMES:
         d_final = distance_to_target(state, target)
-        progress = 1.0 - d_final / max(d_initial, 1.0)
+        if d_initial <= 0.0:
+            # 출발점이 목표와 정확히 겹치면 '진행도'가 정의되지 않는다.
+            return 0.0
+        progress = 1.0 - d_final / d_initial
         return r["failure_max"] * min(max(progress, 0.0), 1.0)
 
     raise ValueError(f"종료 보상을 계산할 수 없는 outcome: {outcome!r}")
@@ -1793,7 +1843,7 @@ def terminal_reward(outcome: str, state: State, target: tuple[float, float],
 uv run pytest tests/test_reward.py -v
 ```
 
-기대: 16 passed (parametrize 4건 포함).
+기대: 15 passed.
 
 - [ ] **Step 5: 커밋**
 
