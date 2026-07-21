@@ -10,11 +10,11 @@ import pytest
 
 from rocket_env.physics import (
     ACTION_TABLE,
-    DRAG_RHO,
     DT,
     G,
     PHI_MAX,
     ROCKET_HEIGHT,
+    TERMINAL_VELOCITY,
     fuel_cost,
     integrate,
 )
@@ -44,12 +44,16 @@ def test_single_freefall_step_matches_hand_computation():
     assert s.step == 1
 
 
-def test_terminal_velocity_converges_to_minus_g_over_rho():
-    """항력 계수는 종단속도가 약 -49.5 m/s가 되도록 정해져 있다."""
+def test_freefall_reaches_the_designed_terminal_velocity():
+    """시뮬레이션이 설계값 TERMINAL_VELOCITY에 실제로 도달하는지 본다.
+
+    DRAG_RHO를 종단속도에서 역산했으므로, 이 테스트는 계수 계산과 적분이
+    서로 맞물려 돌아가는지 확인하는 독립적 검증이 된다.
+    """
     s = make_state(y=100_000.0)
     for _ in range(2000):
         s = integrate(s, thrust=0.0, nozzle_rate=0.0, wind_x=0.0)
-    assert s.vy == pytest.approx(-G / DRAG_RHO, abs=0.01)
+    assert s.vy == pytest.approx(-TERMINAL_VELOCITY, abs=0.01)
 
 
 def test_drag_vanishes_when_moving_with_the_wind():
@@ -69,11 +73,17 @@ def test_upright_full_thrust_gives_net_upward_acceleration_of_g():
 
 
 def test_gimballed_thrust_produces_torque():
-    s = integrate(make_state(phi=math.radians(10.0)), thrust=G,
-                  nozzle_rate=0.0, wind_x=0.0)
-    ft = -G * math.sin(math.radians(10.0))
-    alpha = ft * (ROCKET_HEIGHT / 2.0) / (ROCKET_HEIGHT**2 / 12.0)
-    assert s.omega == pytest.approx(alpha * DT)
+    """얇은 막대(I = H^2/12)의 H/2 지점에 접선력이 걸리면 alpha = 6*ft/H 다.
+
+    프로덕션 코드와 다른 대수 경로로 유도했으므로 독립적인 오라클이다.
+    프로덕션 수식을 그대로 재계산하면 지렛대 길이나 관성모멘트를 함께
+    잘못 잡은 경우를 잡아낼 수 없다.
+    """
+    phi = math.radians(10.0)
+    s = integrate(make_state(phi=phi), thrust=G, nozzle_rate=0.0, wind_x=0.0)
+    thrust_tangential = -G * math.sin(phi)
+    expected_alpha = 6.0 * thrust_tangential / ROCKET_HEIGHT
+    assert s.omega == pytest.approx(expected_alpha * DT)
     assert s.omega < 0.0
 
 
