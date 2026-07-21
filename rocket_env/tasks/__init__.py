@@ -1,11 +1,12 @@
 """태스크 팩토리."""
 
 from rocket_env.tasks.base import Task
+from rocket_env.tasks.catch import CatchTask
 from rocket_env.tasks.landing import LandingTask
 
-__all__ = ["Task", "LandingTask", "make_task"]
+__all__ = ["Task", "LandingTask", "CatchTask", "make_task"]
 
-_REGISTRY = {"landing": LandingTask}
+_REGISTRY = {"landing": LandingTask, "catch": CatchTask}
 
 
 def make_task(name: str) -> Task:
