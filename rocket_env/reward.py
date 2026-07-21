@@ -2,9 +2,11 @@
 
 두 부분으로 나뉜다.
 
-1. 스텝 보상 — 잠재함수 기반 shaping(PBRS) + 연료 패널티.
+1. 스텝 보상 — 잠재함수 기반 shaping(PBRS).
    shaping_gamma=1.0이면 shaping 총합이 정확히 Φ(s_T) - Φ(s_0)로 접히므로,
    에피소드가 길다고 점수가 쌓이지 않는다.
+   연료 패널티(cfg["reward"]["fuel_penalty"])는 실제 소모량을 아는
+   env.step()에서 더한다. 이 모듈은 소모량을 모른다.
 
 2. 종료 보상 — 성공은 기본점 + 품질 보너스, 실패는 목표를 향한 '진행도'.
    실패 보상에 시간 항이 전혀 없다는 점이 중요하다. 원본 환경은 실패에도
@@ -62,7 +64,10 @@ def terminal_reward(outcome: str, state: State, target: tuple[float, float],
 
     if outcome in _FAILURE_OUTCOMES:
         d_final = distance_to_target(state, target)
-        progress = 1.0 - d_final / max(d_initial, 1.0)
+        if d_initial <= 0.0:
+            # 출발점이 목표와 정확히 겹치면 '진행도'가 정의되지 않는다.
+            return 0.0
+        progress = 1.0 - d_final / d_initial
         return r["failure_max"] * min(max(progress, 0.0), 1.0)
 
     raise ValueError(f"종료 보상을 계산할 수 없는 outcome: {outcome!r}")

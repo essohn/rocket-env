@@ -113,13 +113,20 @@ def test_failure_reward_has_no_time_term():
     assert early == pytest.approx(late)
 
 
-@pytest.mark.parametrize("outcome", [
-    Outcome.CRASH, Outcome.MISSED, Outcome.TIMEOUT, Outcome.OUT_OF_FUEL,
-])
-def test_all_failure_outcomes_share_the_same_formula(outcome):
-    r = terminal_reward(outcome, at(x=10.0, y=100.0), TARGET, CFG,
+def test_all_failure_outcomes_share_the_same_formula():
+    """네 가지 실패는 동일한 값을 내야 한다.
+
+    각각 범위 안에 있는지만 보면, MISSED 에만 다른 공식이 붙어도 통과한다.
+    """
+    state = at(x=10.0, y=100.0)
+    scores = [
+        terminal_reward(outcome, state, TARGET, CFG,
                         d_initial=425.0, fuel_frac=0.5)
-    assert 0.0 <= r <= CFG["reward"]["failure_max"]
+        for outcome in (Outcome.CRASH, Outcome.MISSED,
+                        Outcome.TIMEOUT, Outcome.OUT_OF_FUEL)
+    ]
+    assert len(set(scores)) == 1
+    assert 0.0 <= scores[0] <= CFG["reward"]["failure_max"]
 
 
 def test_catch_profile_rewards_slow_contact_much_more_steeply():
@@ -135,7 +142,33 @@ def test_catch_profile_rewards_slow_contact_much_more_steeply():
     assert score(0.0) - score(1.0) > score(3.0) - score(4.0)
 
 
-def test_zero_initial_distance_does_not_divide_by_zero():
+def test_crash_without_progress_scores_zero_at_any_initial_distance():
+    """진행이 없으면 출발 거리와 무관하게 0점이다.
+
+    예전 구현은 분모를 max(d_initial, 1.0)으로 눌렀다. 그러면 목표
+    근처에서 출발했을 때 분모만 1.0으로 올라가고 분자는 작은 실제 거리라서,
+    제자리 추락에도 양수 점수가 나온다 — 이 모듈이 막으려는 바로 그
+    '빨리 자폭' 꼼수다. 현재 프리셋은 d_initial >= 370 이라 도달할 수
+    없지만, 저고도에서 시작하는 라운드를 새로 만들면 되살아난다.
+    """
+    for d in (0.5, 2.0, 425.0):
+        state = at(x=d, y=25.0)          # 목표에서 정확히 d 만큼 떨어진 지점
+        r = terminal_reward(Outcome.CRASH, state, TARGET, CFG,
+                            d_initial=d, fuel_frac=0.5)
+        assert r == pytest.approx(0.0)
+
+
+def test_zero_initial_distance_scores_zero():
     r = terminal_reward(Outcome.CRASH, at(x=0.0, y=25.0), TARGET, CFG,
                         d_initial=0.0, fuel_frac=0.0)
-    assert math.isfinite(r)
+    assert r == 0.0
+
+
+def test_shaping_reads_gamma_from_config():
+    """shaping 이 cfg 의 감가율을 실제로 읽는지 확인한다.
+
+    gamma 를 1.0으로 하드코딩한 구현도 기본 설정에서는 텔레스코핑
+    테스트를 전부 통과한다. 다른 값을 넣어야 비로소 드러난다.
+    """
+    cfg = build_config({"reward": {"shaping_gamma": 0.5}})
+    assert shaping(-2.0, -1.0, cfg) == pytest.approx(0.5 * -1.0 - (-2.0))
