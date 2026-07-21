@@ -3197,6 +3197,322 @@ EOF
 
 ---
 
+### Task 11: 보상 재설계 — 학습 가능한 채점 신호
+
+**배경.** 최종 리뷰가 실측했다. `landing-easy` 40시드에서 무행동 정책이 36.6점,
+DQN 세 번(120k~300k step)이 전부 30~35점으로 **무행동보다 낮았다.** 손으로 짠
+고전 제어기는 60/60 성공에 평균 201.2점이므로 환경 자체는 풀린다. 문제는 보상이다.
+
+원인 셋: (1) 목표가 지면에 있어 **중력이 거리를 공짜로 닫는다** — 자유낙하만으로
+실패 점수의 80~89%를 받는다. (2) `Φ`에 속도 항이 없어 밀집 신호가 성공을 가르는
+접지 속도를 전혀 가리키지 않는다. (3) `θ`가 래핑되지 않아 여러 바퀴 돈 상태에서
+`Φ`가 무한정 작아지는데, 관찰은 `sin/cos`라 감김 횟수를 볼 수 없다(비마르코프).
+
+**Files:**
+- Modify: `rocket_env/reward.py`, `rocket_env/config.py`, `rocket_env/env.py`
+- Modify: `tests/test_reward.py`, `tests/test_exploit_regression.py`
+- Create: `scripts/measure_baseline.py`
+
+**Interfaces (변경):**
+- `terminal_reward(outcome, state, target, cfg, fuel_frac) -> float` — **`d_initial` 인자 제거**
+- `potential(state, target, cfg)` — 속도 항 추가, `θ` 래핑
+- `rocket_env.reward.POTENTIAL_SPEED_SCALE = 50.0`
+- `cfg["reward"]["shaping_w_speed"]` 신규 (기본 0.5)
+- `distance_to_target` **삭제** (더 이상 쓰이지 않음)
+
+- [ ] **Step 1: 실패하는 테스트 작성**
+
+`tests/test_reward.py`에서 `d_initial`을 쓰는 기존 테스트 4개
+(`test_crash_at_start_position_scores_zero`,
+`test_crash_at_target_scores_the_failure_maximum`,
+`test_crash_without_progress_scores_zero_at_any_initial_distance`,
+`test_zero_initial_distance_scores_zero`)를 아래로 **교체**하고,
+남은 `terminal_reward` 호출부의 `d_initial=` 인자를 전부 제거한다.
+`distance_to_target` import와 그 사용처도 지운다.
+
+```python
+def test_freefall_impact_scores_zero():
+    """자유낙하로 지면에 꽂히면 0점이다.
+
+    예전에는 목표까지의 직선 거리로 채점해서, 목표가 지면에 있는 탓에
+    중력이 거리를 공짜로 닫아 주었다. 아무것도 안 하는 정책이 실패 점수의
+    80~89%를 받았고, 학습된 DQN 이 무행동보다 낮은 점수를 받았다.
+    """
+    impact = at(x=0.0, y=25.0, vy=-49.5)     # 종단속도로 접지
+    r = terminal_reward(Outcome.CRASH, impact, TARGET, CFG, fuel_frac=0.5)
+    assert r == pytest.approx(0.0)
+
+
+def test_high_hover_timeout_scores_zero():
+    """목표 고도에 도달하지 못하면 다른 조건이 완벽해도 0점이다."""
+    hovering = at(x=0.0, y=400.0, vx=0.0, vy=0.0)
+    r = terminal_reward(Outcome.TIMEOUT, hovering, TARGET, CFG, fuel_frac=1.0)
+    assert r == pytest.approx(0.0)
+
+
+def test_near_miss_scores_half_the_failure_maximum():
+    """임계값 정확히 위에서 실패하면 절반을 받는다."""
+    s = CFG["success"]
+    near = at(x=0.0, y=25.0, vy=-s["v_max"])
+    r = terminal_reward(Outcome.CRASH, near, TARGET, CFG, fuel_frac=0.5)
+    assert r == pytest.approx(CFG["reward"]["failure_max"] * 0.5)
+
+
+def test_weakest_criterion_determines_the_failure_score():
+    """다섯 조건 중 가장 나쁜 것이 점수를 정한다.
+
+    성공하려면 전부 만족해야 하므로 부분 점수도 가장 약한 고리를 따른다.
+    평균을 쓰면 '속도만 빼고 완벽'이 높은 점수를 받아 자유낙하가 되살아난다.
+    """
+    s = CFG["success"]
+    good = at(x=0.0, y=25.0, vy=-1.0)
+    bad_speed = at(x=0.0, y=25.0, vy=-2.0 * s["v_max"])
+    assert terminal_reward(Outcome.CRASH, good, TARGET, CFG, fuel_frac=0.0) > 0.0
+    assert terminal_reward(Outcome.CRASH, bad_speed, TARGET, CFG,
+                           fuel_frac=0.0) == pytest.approx(0.0)
+
+
+def test_potential_penalises_speed():
+    """Φ 가 속도를 반영해야 밀집 신호가 성공 기준을 가리킨다."""
+    assert potential(at(vy=-40.0), TARGET, CFG) < potential(at(vy=-1.0), TARGET, CFG)
+
+
+def test_potential_wraps_the_attitude_angle():
+    """여러 바퀴 돌아도 Φ 가 무한정 작아지지 않는다.
+
+    물리는 θ 를 감지 않는데 관찰은 sin/cos 라 감김 횟수를 볼 수 없다.
+    보상만 그것에 의존하면 관찰로 구분 불가능한 두 상태가 다른 값을 갖는다.
+    """
+    assert potential(at(theta=0.1), TARGET, CFG) == pytest.approx(
+        potential(at(theta=0.1 + 2.0 * math.pi), TARGET, CFG))
+```
+
+- [ ] **Step 2: 테스트 실패 확인**
+
+```bash
+SDL_VIDEODRIVER=dummy uv run pytest tests/test_reward.py -v
+```
+
+기대: `TypeError` (인자 불일치) 및 새 테스트 실패.
+
+- [ ] **Step 3: `rocket_env/reward.py` 수정**
+
+모듈 상수와 헬퍼를 추가하고 `potential`·`terminal_reward`를 교체한다.
+`distance_to_target`은 삭제한다.
+
+```python
+POTENTIAL_DIST_SCALE = 300.0
+POTENTIAL_SPEED_SCALE = 50.0
+
+
+def _wrap_angle(theta: float) -> float:
+    """각도를 (-π, π] 로 접는다.
+
+    물리는 θ 를 감지 않으므로 여러 바퀴 돈 상태에서 |θ| 가 계속 커진다.
+    반면 관찰은 sin/cos 라 감김 횟수를 볼 수 없다. 보상만 그것에 의존하면
+    관찰로 구분할 수 없는 두 상태가 다른 값을 가져 비마르코프가 된다.
+    """
+    return (theta + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def _closeness(value: float, threshold: float) -> float:
+    """임계값의 2배 지점에서 0이 되는 선형 근접도.
+
+    임계값 자체에서 0.5 다. 부분 점수를 주되 '거의 성공'과 '한참 멀었음'을
+    뚜렷이 가르는 기울기를 만든다.
+    """
+    return min(max(1.0 - value / (2.0 * threshold), 0.0), 1.0)
+
+
+def potential(state: State, target: tuple[float, float], cfg: dict) -> float:
+    """Φ(s). 목표에 가깝고, 수직이고, 느릴수록 0에 가깝다. 항상 0 이하."""
+    r = cfg["reward"]
+    dx = abs(state.x - target[0]) / POTENTIAL_DIST_SCALE
+    dy = abs(state.y - target[1]) / POTENTIAL_DIST_SCALE
+    tilt = abs(_wrap_angle(state.theta)) / (math.pi / 2.0)
+    speed = math.hypot(state.vx, state.vy) / POTENTIAL_SPEED_SCALE
+    return -(r["shaping_w_dist"] * (dx + dy)
+             + r["shaping_w_attitude"] * tilt
+             + r["shaping_w_speed"] * speed)
+```
+
+`terminal_reward`는 시그니처에서 `d_initial`을 빼고 실패 분기를 교체한다.
+성공 분기는 그대로 둔다.
+
+```python
+def terminal_reward(outcome: str, state: State, target: tuple[float, float],
+                    cfg: dict, fuel_frac: float) -> float:
+    """종료 시 한 번 지급되는 보상."""
+    r = cfg["reward"]
+    s = cfg["success"]
+
+    if outcome == Outcome.SUCCESS:
+        ...  # 기존 성공 분기를 그대로 유지 (s 는 위에서 이미 꺼냈다)
+
+    if outcome in _FAILURE_OUTCOMES:
+        speed = math.hypot(state.vx, state.vy)
+        # 성공은 다섯 조건을 모두 만족해야 한다. 실패 점수도 가장 약한
+        # 고리가 정한다 — 평균을 쓰면 "속도만 빼고 완벽"이 높은 점수를
+        # 받아, 중력이 공짜로 만들어 주는 자유낙하 고득점이 되살아난다.
+        return r["failure_max"] * min(
+            _closeness(abs(state.x - target[0]), s["zone_r"]),
+            _closeness(abs(state.y - target[1]), s["zone_r"]),
+            _closeness(speed, s["v_max"]),
+            _closeness(abs(_wrap_angle(state.theta)),
+                       math.radians(s["theta_max_deg"])),
+            _closeness(abs(state.omega), math.radians(s["omega_max_deg"])),
+        )
+
+    raise ValueError(f"종료 보상을 계산할 수 없는 outcome: {outcome!r}")
+```
+
+- [ ] **Step 4: `rocket_env/config.py`에 `shaping_w_speed` 추가**
+
+`DEFAULT_CONFIG["reward"]`의 `shaping_w_attitude` 다음 줄에 넣는다.
+
+```python
+        "shaping_w_attitude": 0.5,
+        "shaping_w_speed": 0.5,
+```
+
+- [ ] **Step 5: `rocket_env/env.py`에서 `d_initial` 제거**
+
+`distance_to_target` import를 지우고, `reset()`의 `self._d_initial = ...` 줄과
+`__init__`의 초기화를 지우고, `step()`의 호출을 바꾼다.
+
+```python
+            reward += terminal_reward(outcome, cur, self._target, self.cfg,
+                                      self._fuel_frac())
+```
+
+- [ ] **Step 6: `SHAPING_BOUND` 재계산**
+
+`tests/test_exploit_regression.py`의 상수를 `4.0`으로 올리고 주석의 프리셋별
+표를 갱신한다. 속도 항이 들어가 `-Φ(s₀)`가 커졌다 — `landing-hard`가
+`2.083(거리) + 0.472(자세) + 0.700(속도) = 3.256`으로 최대다.
+`test_shaping_bound_covers_every_preset_initial_state`가 실제 값을 검증하므로
+계산이 틀렸으면 그 테스트가 알려준다.
+
+- [ ] **Step 7: 테스트 통과 확인**
+
+```bash
+SDL_VIDEODRIVER=dummy uv run pytest -v
+```
+
+`tests/test_exploit_regression.py`를 특히 주시한다. 실패 점수가 크게 낮아지므로
+`test_failure_returns_stay_under_the_failure_ceiling`은 여유가 더 커지고,
+`test_loitering_does_not_out_score_descending`과
+`test_shorter_episodes_do_not_earn_more_than_longer_ones`는 값이 바뀌지만
+부등식은 유지되어야 한다. **깨지면 상수를 조정하지 말고 보고한다.**
+
+- [ ] **Step 8: 커밋**
+
+```bash
+git add rocket_env/ tests/
+git commit -m "fix: 실패 점수를 성공 조건 근접도로 교체하고 Φ에 속도 항 추가"
+```
+
+- [ ] **Step 9: 베이스라인 측정 스크립트 작성**
+
+`scripts/measure_baseline.py`:
+
+```python
+"""프리셋별 베이스라인 측정.
+
+등급 컷을 눈감고 정하지 않기 위한 도구다. 무행동 정책과 학습된 DQN 의
+점수 분포를 나란히 재서 결과를 기록한다.
+
+이 스크립트가 있어야 하는 이유는 단순하다 — 모든 정책이 같은 점수를 받는
+환경도 모든 테스트를 통과한다. 변별력은 재봐야 안다.
+
+사용:
+    uv run python scripts/measure_baseline.py --preset landing-easy --steps 100000
+"""
+
+import argparse
+import statistics
+
+import gymnasium as gym
+import numpy as np
+
+import rocket_env  # noqa: F401
+from rocket_env.config import PRESETS
+
+NOOP = 1
+EVAL_SEEDS = range(40)
+
+
+def evaluate(env, act) -> tuple[float, float]:
+    """(평균 점수, 성공률)."""
+    scores, wins = [], 0
+    for seed in EVAL_SEEDS:
+        obs, _ = env.reset(seed=10_000 + seed)
+        done = truncated = False
+        total = 0.0
+        info = {}
+        while not (done or truncated):
+            obs, reward, done, truncated, info = env.step(act(obs))
+            total += float(reward)
+        scores.append(total)
+        wins += int(info["is_success"])
+    return statistics.mean(scores), wins / len(EVAL_SEEDS)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--preset", default="landing-easy", choices=list(PRESETS))
+    parser.add_argument("--steps", type=int, default=100_000)
+    parser.add_argument("--lr", type=float, default=6e-4)
+    args = parser.parse_args()
+
+    env = gym.make("rocket-v0", config=PRESETS[args.preset])
+
+    noop_score, noop_rate = evaluate(env, lambda _obs: NOOP)
+    rng = np.random.default_rng(0)
+    rand_score, rand_rate = evaluate(
+        env, lambda _obs: int(rng.integers(env.action_space.n)))
+
+    from stable_baselines3 import DQN
+
+    model = DQN("MlpPolicy", env, verbose=0, device="cpu",
+                learning_rate=args.lr, buffer_size=200_000,
+                learning_starts=5_000, policy_kwargs={"net_arch": [256, 256]})
+    model.learn(total_timesteps=args.steps)
+    dqn_score, dqn_rate = evaluate(
+        env, lambda obs: int(model.predict(obs, deterministic=True)[0]))
+
+    print(f"preset={args.preset} steps={args.steps} lr={args.lr}")
+    print(f"  no-op   score={noop_score:8.2f}  success={noop_rate:6.1%}")
+    print(f"  random  score={rand_score:8.2f}  success={rand_rate:6.1%}")
+    print(f"  DQN     score={dqn_score:8.2f}  success={dqn_rate:6.1%}")
+    print(f"  separation (DQN - no-op) = {dqn_score - noop_score:+.2f}")
+    env.close()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+- [ ] **Step 10: `landing-easy`에서 측정하고 결과를 그대로 보고**
+
+```bash
+uv run python scripts/measure_baseline.py --preset landing-easy --steps 100000
+```
+
+**판단하지 말고 숫자를 그대로 보고한다.** DQN 이 무행동을 유의미하게
+(성공률 > 0, 점수 차 +20 이상) 앞서면 재설계가 통한 것이고, 여전히 붙어
+있으면 프리셋 난이도 조정이 추가로 필요하다는 뜻이다. 어느 쪽이든 다음
+결정의 입력이다.
+
+- [ ] **Step 11: 커밋**
+
+```bash
+git add scripts/measure_baseline.py
+git commit -m "feat: 베이스라인 측정 스크립트"
+```
+
+---
+
 ## 완료 기준
 
 - [ ] `SDL_VIDEODRIVER=dummy uv run pytest -v` 전부 통과
