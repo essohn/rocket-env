@@ -142,6 +142,25 @@ def _deep_merge(base: dict, overlay: dict) -> dict:
     return out
 
 
+def _reject_unknown_keys(user: dict, schema: dict, path: str = "") -> None:
+    """스키마에 없는 키를 거부한다.
+
+    오타 난 키가 조용히 무시되는 것이 가장 나쁜 실패 모드다.
+    `{"fuel": {"capacty": 50.0}}` 처럼 한 글자만 틀려도 병합은 성공하고,
+    의도한 설정이 전혀 적용되지 않은 채로 몇 시간짜리 학습이 끝난다.
+    라운드 설정을 쓰는 조교도 학생도 이 실수는 즉시 알아야 한다.
+    """
+    for key, value in user.items():
+        full = f"{path}{key}"
+        if key not in schema:
+            raise ConfigError(
+                f"알 수 없는 설정 키: {full!r}. "
+                f"사용 가능한 키: {sorted(schema)}"
+            )
+        if isinstance(value, dict) and isinstance(schema[key], dict):
+            _reject_unknown_keys(value, schema[key], path=f"{full}.")
+
+
 def build_config(user_config: dict | None) -> dict:
     """기본값 → 태스크 프로파일 → 사용자 설정 순으로 병합한 완전한 설정."""
     user = user_config or {}
@@ -151,6 +170,8 @@ def build_config(user_config: dict | None) -> dict:
         raise ConfigError(
             f"다음 키는 환경 상수라 변경할 수 없습니다: {sorted(locked)}"
         )
+
+    _reject_unknown_keys(user, DEFAULT_CONFIG)
 
     task = user.get("task", DEFAULT_CONFIG["task"])
     if task not in ("landing", "catch"):
