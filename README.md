@@ -58,7 +58,7 @@ env = gym.make("rocket-v0", config=PRESETS["catch-hard"])
 | 4 | `sin(theta)` | 10 | `step / max_steps` |
 | 5 | `cos(theta)` | | |
 
-행동은 `Discrete(12)` — 추력 `{0, 0.2g, 1.0g, 2.0g}` × 노즐 각속도 `{-30, 0, +30} deg/s`.
+행동은 `Discrete(12)` — 추력 `{0, 0.2g, 1.0g, 2.0g}` × 노즐 각속도 `{-120, 0, +120} deg/s`.
 인덱스는 `thrust_idx * 3 + nozzle_idx`.
 
 ## 보상

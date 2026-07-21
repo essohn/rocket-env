@@ -91,8 +91,11 @@ PRESETS: dict[str, dict[str, Any]] = {
         "task": "landing",
         "wind": {"mode": "none", "max_speed": 0.0},
         "fuel": {"capacity": None},
-        "init": {"y": 450.0, "vy_range": [-30.0, -30.0],
-                 "x_range": [-100.0, 100.0], "theta_range_deg": [-15.0, 15.0]},
+        # 초기 자세를 성공 임계(±10°) 안쪽으로 잡는다. 1단계에서는 자세
+        # 보정 없이 "내려오는 속도 줄이기"만 배우면 되게 한다. 고도와
+        # 초기 하강속도도 낮춰 에피소드를 짧게 만든다.
+        "init": {"y": 200.0, "vy_range": [-20.0, -20.0],
+                 "x_range": [-50.0, 50.0], "theta_range_deg": [-5.0, 5.0]},
     },
     "landing-normal": {
         "task": "landing",

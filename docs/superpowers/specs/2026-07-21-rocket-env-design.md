@@ -230,7 +230,7 @@ step:   w += ou_theta·(0 - w)·dt + ou_sigma·√dt·N(0,1)
 
 ### 행동: `Discrete(12)`
 
-추력 `{0, 0.2g, 1.0g, 2.0g}` × 노즐 각속도 `{-30°/s, 0, +30°/s}`.
+추력 `{0, 0.2g, 1.0g, 2.0g}` × 노즐 각속도 `{-120°/s, 0, +120°/s}`.
 
 인덱스 순서: `action = thrust_idx * 3 + vphi_idx`.
 
@@ -457,7 +457,7 @@ R = failure_max · clip(1 - d_final / d_initial, 0, 1)
 
 | 프리셋 | task | wind | fuel | init θ | vy₀ | zone_r |
 |--------|------|------|------|--------|-----|--------|
-| `landing-easy` | landing | none | ∞ | ±15° | -30 | 50 |
+| `landing-easy` | landing | none | ∞ | ±5° | -20 | 50 |
 | `landing-normal` | landing | constant 8 m/s | 120 | ±45° | -60~-50 | 50 |
 | `landing-hard` | landing | gust (σ=3, ±15) | 90 | ±85° | -70~-60 | 30 |
 | `catch-normal` | catch | constant 5 m/s | 140 | ±30° | -50~-40 | 6 |

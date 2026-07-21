@@ -32,7 +32,11 @@ WORLD_Y_MIN, WORLD_Y_MAX = 0.0, 570.0
 # --- 행동 테이블 ---
 # 추력 0을 포함하는 것이 핵심이다. 엔진을 끌 수 있어야 연료 절약이 전략이 된다.
 THRUST_LEVELS = (0.0, 0.2 * G, 1.0 * G, 2.0 * G)
-NOZZLE_RATES = (-math.radians(30.0), 0.0, math.radians(30.0))
+# 노즐 슬루율. 30°/s 로는 한계각까지 0.67 초(13 스텝)가 걸려, 자세 보정
+# 행동의 효과가 13 스텝 뒤에 나타난다. 크레딧 할당이 사실상 불가능해
+# DQN 이 학습하지 못했다. 120°/s 면 0.17 초다 — 적분기 구조는 그대로 두되
+# 지연만 4배 줄인다.
+NOZZLE_RATES = (-math.radians(120.0), 0.0, math.radians(120.0))
 
 # 인덱스 = thrust_idx * 3 + nozzle_idx
 ACTION_TABLE: tuple[tuple[float, float], ...] = tuple(
