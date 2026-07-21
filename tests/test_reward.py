@@ -149,19 +149,27 @@ def test_failure_reward_has_no_time_term():
     assert early == pytest.approx(late)
 
 
-def test_all_failure_outcomes_share_the_same_formula():
-    """네 가지 실패는 동일한 값을 내야 한다.
-
-    각각 범위 안에 있는지만 보면, MISSED 에만 다른 공식이 붙어도 통과한다.
-    """
+def test_contact_failures_share_the_same_formula():
+    """접지·포획실패·연료소진은 같은 공식을 쓴다."""
     state = at(x=10.0, y=100.0)
-    scores = [
-        terminal_reward(outcome, state, TARGET, CFG, fuel_frac=0.5)
-        for outcome in (Outcome.CRASH, Outcome.MISSED,
-                        Outcome.TIMEOUT, Outcome.OUT_OF_FUEL)
-    ]
+    scores = [terminal_reward(o, state, TARGET, CFG, fuel_frac=0.5)
+              for o in (Outcome.CRASH, Outcome.MISSED, Outcome.OUT_OF_FUEL)]
     assert len(set(scores)) == 1
     assert 0.0 <= scores[0] <= CFG["reward"]["failure_max"]
+
+
+def test_timeout_scores_zero_even_in_a_near_perfect_state():
+    """시도하지 않으면 0점이다.
+
+    목표 바로 위에서 거의 멈춘 상태라도 착륙하지 않았으면 0점이다.
+    맴도는 쪽이 착륙을 시도하다 실패하는 쪽보다 높은 점수를 받으면
+    최적 전략이 '절대 착륙하지 않기'가 되기 때문이다. 실제로
+    landing-easy 의 고도를 낮추자 1.0g 정지 추력 정책이 정확히 그
+    상태로 수렴했다.
+    """
+    almost = at(x=0.0, y=26.0, vx=0.0, vy=-0.5)
+    assert terminal_reward(Outcome.TIMEOUT, almost, TARGET, CFG,
+                           fuel_frac=1.0) == 0.0
 
 
 def test_catch_profile_rewards_slow_contact_much_more_steeply():

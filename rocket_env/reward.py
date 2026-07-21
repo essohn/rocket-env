@@ -27,8 +27,9 @@ from rocket_env.types import Outcome, State
 POTENTIAL_DIST_SCALE = 300.0
 POTENTIAL_SPEED_SCALE = 50.0
 
-_FAILURE_OUTCOMES = frozenset({
-    Outcome.CRASH, Outcome.MISSED, Outcome.TIMEOUT, Outcome.OUT_OF_FUEL,
+# 판정 지점에 실제로 도달한 실패. 부분 점수를 받는다.
+_CONTACT_FAILURES = frozenset({
+    Outcome.CRASH, Outcome.MISSED, Outcome.OUT_OF_FUEL,
 })
 
 
@@ -87,7 +88,13 @@ def terminal_reward(outcome: str, state: State, target: tuple[float, float],
             + r["w_time"] * (1.0 - state.step / cfg["max_steps"])
         )
 
-    if outcome in _FAILURE_OUTCOMES:
+    if outcome == Outcome.TIMEOUT:
+        # 시간이 다 되도록 판정 지점에 가지 않았다면 시도 자체를 하지 않은
+        # 것이다. 목표 근처에서 맴도는 쪽이 착륙을 시도하다 실패하는 쪽보다
+        # 높은 점수를 받으면, 최적 전략은 "절대 착륙하지 않기"가 된다.
+        return 0.0
+
+    if outcome in _CONTACT_FAILURES:
         speed = math.hypot(state.vx, state.vy)
         # 성공은 다섯 조건을 모두 만족해야 한다. 실패 점수도 가장 약한
         # 고리가 정한다 — 평균을 쓰면 "속도만 빼고 완벽"이 높은 점수를
