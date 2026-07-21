@@ -3513,6 +3513,102 @@ git commit -m "feat: 베이스라인 측정 스크립트"
 
 ---
 
+### Task 12: 제어 난이도 완화 — 노즐 슬루율과 1단계 프리셋
+
+**배경.** Task 11 이 보상을 정직하게 만들었다 — 무행동 점수가 36.6에서 1.24로
+붕괴했고 자유낙하 꼼수가 사라졌다. 그러나 DQN 은 여전히 성공률 0%다. 이제
+남은 것은 **제어 문제 자체의 난이도**다.
+
+두 가지가 겹쳐 있다.
+
+1. **삼중 적분기**: 행동 → 노즐 각속도 → φ → α → ω → θ. 노즐이 30°/s 라
+   φ 를 한계(20°)까지 돌리는 데 0.67 초, 13 스텝이 걸린다. 자세를 고치려는
+   행동의 효과가 13 스텝 뒤에 나타나니 크레딧 할당이 극도로 어렵다.
+2. **`landing-easy` 가 1단계가 아니다**: 초기 자세가 ±15°인데 성공 임계가
+   ±10°다. 즉 **첫 라운드부터 자세 보정이 필수**다. 학생이 "속도 줄이기"와
+   "자세 잡기"를 동시에 배워야 한다.
+
+**Files:**
+- Modify: `rocket_env/physics.py`, `rocket_env/config.py`
+- Modify: `tests/test_physics.py`
+- Modify: `README.md`, `docs/superpowers/specs/2026-07-21-rocket-env-design.md`
+
+- [ ] **Step 1: 노즐 각속도를 120°/s 로**
+
+`rocket_env/physics.py`:
+
+```python
+# 노즐 슬루율. 30°/s 로는 한계각까지 0.67 초(13 스텝)가 걸려, 자세 보정
+# 행동의 효과가 13 스텝 뒤에 나타난다. 크레딧 할당이 사실상 불가능해
+# DQN 이 학습하지 못했다. 120°/s 면 0.17 초다 — 적분기 구조는 그대로 두되
+# 지연만 4배 줄인다.
+NOZZLE_RATES = (-math.radians(120.0), 0.0, math.radians(120.0))
+```
+
+- [ ] **Step 2: 행동 테이블 테스트 갱신**
+
+`tests/test_physics.py::test_action_table_has_12_entries_in_thrust_major_order`
+의 각도 상수를 30 → 120 으로 바꾼다.
+
+```python
+    assert ACTION_TABLE[0] == (0.0, -math.radians(120.0))
+    assert ACTION_TABLE[11] == (2.0 * G, math.radians(120.0))
+```
+
+- [ ] **Step 3: `landing-easy` 를 진짜 1단계로**
+
+`rocket_env/config.py` 의 `PRESETS["landing-easy"]`:
+
+```python
+    "landing-easy": {
+        "task": "landing",
+        "wind": {"mode": "none", "max_speed": 0.0},
+        "fuel": {"capacity": None},
+        # 초기 자세를 성공 임계(±10°) 안쪽으로 잡는다. 1단계에서는 자세
+        # 보정 없이 "내려오는 속도 줄이기"만 배우면 되게 한다. 고도와
+        # 초기 하강속도도 낮춰 에피소드를 짧게 만든다.
+        "init": {"y": 200.0, "vy_range": [-20.0, -20.0],
+                 "x_range": [-50.0, 50.0], "theta_range_deg": [-5.0, 5.0]},
+    },
+```
+
+- [ ] **Step 4: 전체 테스트**
+
+```bash
+SDL_VIDEODRIVER=dummy uv run pytest -v
+```
+
+`test_shaping_bound_covers_every_preset_initial_state` 가 `landing-easy` 의
+`-Φ(s₀)` 감소를 자동으로 확인한다. exploit 회귀 테스트의 부등식이 깨지면
+**상수를 만지지 말고 보고한다.**
+
+- [ ] **Step 5: 문서 갱신**
+
+`README.md` 의 행동 공간 설명(`{-30, 0, +30} deg/s`)과 스펙 6절의 같은 값을
+120 으로 고친다. 스펙 9절 프리셋 표의 `landing-easy` 행도 갱신한다.
+
+- [ ] **Step 6: 커밋**
+
+```bash
+git add rocket_env/ tests/ README.md docs/
+git commit -m "fix: 노즐 슬루율 120deg/s, landing-easy를 자세 보정 불필요 수준으로"
+```
+
+- [ ] **Step 7: 재측정**
+
+```bash
+uv run python scripts/measure_baseline.py --preset landing-easy --steps 100000
+```
+
+**판단하지 말고 숫자를 그대로 보고한다.** 이어서 `landing-normal` 도 같은
+예산으로 측정해 난이도 사다리가 실제로 존재하는지 확인한다.
+
+```bash
+uv run python scripts/measure_baseline.py --preset landing-normal --steps 100000
+```
+
+---
+
 ## 완료 기준
 
 - [ ] `SDL_VIDEODRIVER=dummy uv run pytest -v` 전부 통과
