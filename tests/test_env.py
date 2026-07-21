@@ -1,0 +1,150 @@
+"""Gymnasium 파사드 검증: API 준수, 관찰 규격, info 계약, 재현성."""
+
+import math
+
+import gymnasium as gym
+import numpy as np
+import pytest
+from gymnasium.utils.env_checker import check_env
+
+import rocket_env  # noqa: F401  — 환경 등록 트리거
+from rocket_env.config import PRESETS
+from rocket_env.env import OBS_DIM, RocketEnv
+from rocket_env.types import Outcome
+
+NOOP = 1        # 추력 0, 노즐 정지
+FULL_UP = 10    # 추력 2g, 노즐 정지
+
+
+def rollout(env, action, seed):
+    env.reset(seed=seed)
+    total = 0.0
+    while True:
+        _, reward, terminated, truncated, info = env.step(action)
+        total += reward
+        if terminated or truncated:
+            return total, info
+
+
+def test_registered_ids_are_makeable():
+    for env_id in ("rocket-v0", "rocket-landing-v0", "rocket-catch-v0"):
+        env = gym.make(env_id)
+        env.reset(seed=0)
+        env.close()
+
+
+def test_alias_ids_select_the_right_task():
+    assert gym.make("rocket-catch-v0").unwrapped.cfg["task"] == "catch"
+    assert gym.make("rocket-landing-v0").unwrapped.cfg["task"] == "landing"
+
+
+def test_alias_id_still_accepts_extra_config():
+    env = gym.make("rocket-catch-v0", config={"max_steps": 123})
+    assert env.unwrapped.cfg["task"] == "catch"
+    assert env.unwrapped.cfg["max_steps"] == 123
+
+
+def test_passes_gymnasium_env_checker():
+    check_env(RocketEnv(), skip_render_check=True)
+
+
+def test_spaces_match_the_contract():
+    env = RocketEnv()
+    assert env.observation_space.shape == (OBS_DIM,)
+    assert env.observation_space.dtype == np.float32
+    assert env.action_space.n == 12
+
+
+def test_observation_is_finite_and_correctly_typed():
+    env = RocketEnv()
+    obs, _ = env.reset(seed=0)
+    assert obs.shape == (OBS_DIM,)
+    assert obs.dtype == np.float32
+    assert np.all(np.isfinite(obs))
+
+
+def test_unlimited_fuel_shows_full_fuel_fraction():
+    env = RocketEnv(config=PRESETS["landing-easy"])
+    obs, _ = env.reset(seed=0)
+    assert obs[8] == pytest.approx(1.0)
+
+
+def test_info_contains_every_contract_key():
+    env = RocketEnv()
+    env.reset(seed=0)
+    _, _, _, _, info = env.step(NOOP)
+    for key in ("is_success", "outcome", "fuel_left", "fuel_frac",
+                "impact_speed", "wind_x", "step"):
+        assert key in info
+
+
+def test_same_seed_reproduces_identical_trajectories():
+    env = RocketEnv(config=PRESETS["landing-hard"])
+    a, _ = rollout(env, NOOP, seed=123)
+    b, _ = rollout(env, NOOP, seed=123)
+    c, _ = rollout(env, NOOP, seed=124)
+    assert a == b
+    assert a != c
+
+
+def test_config_seed_is_not_consumed_by_the_env():
+    """cfg['seed']는 호출자 메타데이터다. 환경이 읽으면 학습 시
+    모든 에피소드가 동일해지는 버그가 생긴다."""
+    env = RocketEnv(config={**PRESETS["landing-normal"], "seed": 7})
+    env.reset()
+    first = env.unwrapped.state.x
+    env.reset()
+    assert env.unwrapped.state.x != first
+
+
+def test_zero_thrust_from_altitude_ends_in_crash():
+    env = RocketEnv(config=PRESETS["landing-normal"])
+    _, info = rollout(env, NOOP, seed=0)
+    assert info["outcome"] == Outcome.CRASH
+    assert info["is_success"] is False
+    assert info["impact_speed"] is not None
+
+
+def test_running_out_of_fuel_is_reported_distinctly():
+    env = RocketEnv(config={**PRESETS["landing-normal"],
+                            "fuel": {"capacity": 1.0}})
+    _, info = rollout(env, FULL_UP, seed=0)
+    assert info["outcome"] == Outcome.OUT_OF_FUEL
+
+
+def test_timeout_truncates_rather_than_terminates():
+    """추력 1g 부근으로 떠 있으면 max_steps에 걸린다."""
+    env = RocketEnv(config={**PRESETS["landing-easy"], "max_steps": 30})
+    env.reset(seed=0)
+    for _ in range(30):
+        obs, reward, terminated, truncated, info = env.step(7)  # 1.0g, 노즐 정지
+    assert truncated
+    assert not terminated
+    assert info["outcome"] == Outcome.TIMEOUT
+
+
+def test_fuel_never_goes_negative():
+    env = RocketEnv(config={**PRESETS["landing-normal"],
+                            "fuel": {"capacity": 2.0}})
+    env.reset(seed=0)
+    for _ in range(200):
+        _, _, terminated, truncated, info = env.step(FULL_UP)
+        assert info["fuel_left"] >= 0.0
+        if terminated or truncated:
+            break
+
+
+def test_wind_disabled_config_keeps_wind_at_zero():
+    env = RocketEnv(config=PRESETS["landing-easy"])
+    env.reset(seed=0)
+    for _ in range(50):
+        _, _, terminated, truncated, info = env.step(NOOP)
+        assert info["wind_x"] == 0.0
+        if terminated or truncated:
+            break
+
+
+def test_catch_task_can_be_selected_by_config():
+    env = RocketEnv(config=PRESETS["catch-normal"])
+    _, info = rollout(env, NOOP, seed=0)
+    assert info["outcome"] in (Outcome.MISSED, Outcome.CRASH)
