@@ -10,6 +10,8 @@
 import copy
 from typing import Any
 
+from rocket_env.physics import ROCKET_HEIGHT, WORLD_X_MAX, WORLD_X_MIN, WORLD_Y_MAX
+
 # 물리·관찰·행동 상수는 config로 노출하지 않는다.
 LOCKED_KEYS = frozenset({
     "dt", "g", "H", "rocket_height", "observation", "action",
@@ -172,8 +174,27 @@ def _reject_unknown_keys(user: dict, schema: dict, path: str = "") -> None:
                 f"알 수 없는 설정 키: {full!r}. "
                 f"사용 가능한 키: {sorted(schema)}"
             )
+        expected = schema[key]
+        if _kind(expected) != "none" and _kind(value) not in (_kind(expected), "none"):
+            raise ConfigError(
+                f"{full!r} 의 형태가 스키마와 다릅니다: "
+                f"{_kind(value)} (스키마는 {_kind(expected)})")
         if isinstance(value, dict) and isinstance(schema[key], dict):
             _reject_unknown_keys(value, schema[key], path=f"{full}.")
+
+
+def _kind(value) -> str:
+    if isinstance(value, dict):
+        return "dict"
+    if isinstance(value, (list, tuple)):
+        return "list"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, str):
+        return "str"
+    return "none"
 
 
 def build_config(user_config: dict | None) -> dict:
@@ -197,8 +218,30 @@ def build_config(user_config: dict | None) -> dict:
         cfg = _deep_merge(cfg, CATCH_OVERRIDES)
     cfg = _deep_merge(cfg, user)
 
+    _normalize_wind(cfg)
     _validate_ranges(cfg)
     return cfg
+
+
+def _normalize_wind(cfg: dict) -> None:
+    """mode 가 실제 동작을 결정하도록 동반 값을 맞춘다.
+
+    WindProcess 는 mode 를 읽지 않고 max_speed/ou_theta/ou_sigma 만 본다.
+    여기서 맞춰주지 않으면 mode 는 장식일 뿐이고, 오설정이 조용히 통과한다.
+    """
+    wind = cfg["wind"]
+    if wind["mode"] == "none":
+        wind["max_speed"] = 0.0
+        wind["ou_theta"] = 0.0
+        wind["ou_sigma"] = 0.0
+    elif wind["mode"] == "constant":
+        wind["ou_theta"] = 0.0
+        wind["ou_sigma"] = 0.0
+    elif wind["mode"] == "gust" and wind["ou_sigma"] <= 0.0:
+        raise ConfigError(
+            "wind.mode='gust' 인데 ou_sigma 가 0 이하입니다 — 돌풍이 아니라 "
+            f"상수 바람이 됩니다: ou_sigma={wind['ou_sigma']}"
+        )
 
 
 def _validate_ranges(cfg: dict) -> None:
@@ -226,6 +269,27 @@ def _validate_ranges(cfg: dict) -> None:
         raise ConfigError(
             f"reward.v_ref는 양수여야 합니다: {cfg['reward']['v_ref']}"
         )
+
+    ground = ROCKET_HEIGHT / 2.0
+    ceiling = WORLD_Y_MAX - ROCKET_HEIGHT / 2.0
+
+    init = cfg["init"]
+    if not ground < init["y"] < ceiling:
+        raise ConfigError(
+            f"init.y는 {ground}와 {ceiling} 사이여야 합니다: {init['y']}")
+    for key in ("x_range", "vy_range", "theta_range_deg"):
+        pair = init[key]
+        if not (isinstance(pair, (list, tuple)) and len(pair) == 2
+                and pair[0] <= pair[1]):
+            raise ConfigError(
+                f"init.{key}는 [최솟값, 최댓값] 2원소여야 합니다: {pair!r}")
+    if not (WORLD_X_MIN < init["x_range"][0]
+            and init["x_range"][1] < WORLD_X_MAX):
+        raise ConfigError(f"init.x_range가 세계 경계를 벗어납니다: {init['x_range']}")
+    if not ground < cfg["catch"]["y_arm"] < ceiling:
+        raise ConfigError(
+            f"catch.y_arm은 {ground}와 {ceiling} 사이여야 합니다: "
+            f"{cfg['catch']['y_arm']}")
 
 
 def validate_train_config(train_cfg: dict,

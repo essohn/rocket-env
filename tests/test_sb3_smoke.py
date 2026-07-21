@@ -4,9 +4,9 @@
 않으면 건너뛴다 — SB3는 런타임 의존성이 아니다.
 """
 
+import math
 import os
 
-import numpy as np
 import pytest
 
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
@@ -21,44 +21,35 @@ from rocket_env.config import PRESETS  # noqa: E402
 
 
 @pytest.mark.slow
-def test_dqn_trains_and_predicts_without_error(tmp_path):
+def test_saved_model_drives_the_full_grading_loop(tmp_path):
+    """서버 워커가 실제로 밟는 경로를 그대로 시험한다.
+
+    저장 → 로드 → predict() 출력을 그대로 step() 에 전달 → 점수 누적.
+    """
     env = gym.make("rocket-v0", render_mode="rgb_array",
                    config=PRESETS["landing-basic"])
-    model = DQN("MlpPolicy", env, verbose=0, device="cpu",
+    model = DQN("MlpPolicy", env, verbose=0, device="cpu", seed=0,
                 learning_starts=200, buffer_size=5_000,
                 policy_kwargs={"net_arch": [64, 64]})
-    model.learn(total_timesteps=5_000)
-
+    model.learn(total_timesteps=2_000)
     path = tmp_path / "model.zip"
     model.save(path)
     loaded = DQN.load(path, env=env, device="cpu")
 
-    obs, _ = env.reset(seed=0)
-    action, _ = loaded.predict(obs, deterministic=True)
-    assert env.action_space.contains(int(action))
-    env.close()
-
-
-@pytest.mark.slow
-def test_server_evaluation_loop_shape_works():
-    """서버 워커의 평가 루프와 동일한 형태로 돌려본다."""
-    env = gym.make("rocket-v0", render_mode="rgb_array",
-                   config=PRESETS["landing-descent"])
     scores, outcomes = [], []
-    rng = np.random.default_rng(0)
-
-    for i in range(3):
+    for i in range(2):
         obs, _ = env.reset(seed=1000 + i)
         done = truncated = False
         score = 0.0
         info = {}
         while not (done or truncated):
-            action = int(rng.integers(env.action_space.n))
+            action, _ = loaded.predict(obs, deterministic=True)
             obs, reward, done, truncated, info = env.step(action)
             score += float(reward)
+        assert math.isfinite(score)
         scores.append(score)
         outcomes.append(bool(info["is_success"]))
 
-    assert len(scores) == 3
+    assert len(scores) == 2
     assert all(isinstance(o, bool) for o in outcomes)
     env.close()

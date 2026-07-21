@@ -153,3 +153,77 @@ def test_task_mismatch_is_an_error():
     ok, warnings, errors = validate_train_config(train_cfg, eval_cfg)
     assert not ok
     assert any("task" in e for e in errors)
+
+
+# --- Step 1: wind.mode 가 실제 동작을 결정한다 ---
+
+def test_wind_mode_none_forces_zero_wind():
+    """max_speed 를 함께 지정하지 않아도 mode 만으로 무풍이 되어야 한다."""
+    cfg = build_config({"wind": {"mode": "none"}})
+    assert cfg["wind"]["max_speed"] == 0.0
+    assert cfg["wind"]["ou_theta"] == 0.0
+    assert cfg["wind"]["ou_sigma"] == 0.0
+
+
+def test_wind_mode_constant_clears_the_ou_terms():
+    cfg = build_config({"wind": {"mode": "constant", "max_speed": 5.0,
+                                 "ou_sigma": 3.0}})
+    assert cfg["wind"]["ou_sigma"] == 0.0
+
+
+def test_gust_without_sigma_raises_config_error():
+    with pytest.raises(ConfigError, match="ou_sigma"):
+        build_config({"wind": {"mode": "gust", "max_speed": 10.0}})
+
+
+# --- Step 2: init.* 와 catch.* 검증 ---
+
+def test_init_y_out_of_bounds_raises_config_error():
+    with pytest.raises(ConfigError, match="init.y"):
+        build_config({"init": {"y": 900.0}})
+
+
+def test_init_vy_range_scalar_raises_config_error():
+    with pytest.raises(ConfigError, match="vy_range"):
+        build_config({"init": {"vy_range": -50.0}})
+
+
+def test_init_x_range_outside_world_bounds_raises_config_error():
+    with pytest.raises(ConfigError, match="x_range"):
+        build_config({"init": {"x_range": [-400.0, 400.0]}})
+
+
+def test_catch_y_arm_out_of_bounds_raises_config_error():
+    with pytest.raises(ConfigError, match="catch.y_arm"):
+        build_config({"catch": {"y_arm": 900.0}})
+
+
+@pytest.mark.parametrize("name", [
+    "landing-basic", "landing-attitude", "landing-descent",
+    "landing-wind", "landing-gust", "catch",
+])
+def test_every_preset_still_builds_after_range_validation(name):
+    """Step 1~3 의 새 검증이 과하지 않은지 확인하는 회귀 체크."""
+    assert build_config(PRESETS[name])
+
+
+# --- Step 3: _reject_unknown_keys 형태 검사 ---
+
+def test_wrong_scalar_type_raises_config_error():
+    with pytest.raises(ConfigError, match="max_steps"):
+        build_config({"max_steps": "800"})
+
+
+def test_seed_schema_none_key_is_exempt_from_shape_check():
+    """seed 는 스키마 기본값이 None 이라 형태 검사에서 예외로 둔다.
+
+    이 경우 잘못된 값은 여기서 잡히지 않고, 나중에 reset(seed=...) 호출부에서
+    터진다. 형태를 알 수 없는 키까지 억지로 검사하면 오탐이 더 위험하다는
+    판단이다.
+    """
+    cfg = build_config({"seed": {"typo": 1}})
+    assert cfg["seed"] == {"typo": 1}
+
+
+def test_fuel_capacity_none_override_still_passes():
+    assert build_config({"fuel": {"capacity": None}})["fuel"]["capacity"] is None
