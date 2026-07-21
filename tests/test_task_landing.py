@@ -67,6 +67,39 @@ def test_flying_off_the_side_crashes():
     assert TASK.evaluate(at(x=299.0), cur, CFG) == Outcome.CRASH
 
 
+def test_touchdown_exactly_at_speed_threshold_crashes():
+    """임계값 비교는 strict `<` 다 — 정확히 임계값이면 실패한다.
+
+    ±0.1로만 찔러보는 테스트는 `<` 와 `<=` 를 구별하지 못한다. 성적을
+    만드는 코드에서 이 한 칸이 '겨우 통과'와 '겨우 실패'를 가른다.
+    """
+    cur = at(y=GROUND - 0.1, vy=-CFG["success"]["v_max"])
+    assert TASK.evaluate(at(y=GROUND + 5.0), cur, CFG) == Outcome.CRASH
+
+
+def test_touchdown_exactly_at_pad_edge_crashes():
+    cur = at(y=GROUND - 0.1, x=CFG["success"]["zone_r"], vy=-1.0)
+    assert TASK.evaluate(at(y=GROUND + 5.0), cur, CFG) == Outcome.CRASH
+
+
+def test_touchdown_exactly_at_tilt_threshold_crashes():
+    cur = at(y=GROUND - 0.1, vy=-1.0,
+             theta=math.radians(CFG["success"]["theta_max_deg"]))
+    assert TASK.evaluate(at(y=GROUND + 5.0), cur, CFG) == Outcome.CRASH
+
+
+def test_touchdown_exactly_at_spin_threshold_crashes():
+    cur = at(y=GROUND - 0.1, vy=-1.0,
+             omega=math.radians(CFG["success"]["omega_max_deg"]))
+    assert TASK.evaluate(at(y=GROUND + 5.0), cur, CFG) == Outcome.CRASH
+
+
+def test_ground_contact_triggers_exactly_at_ground_level():
+    """접지 판정만 `<=` 다 — 정확히 지면 높이에 닿으면 접지로 본다."""
+    cur = at(y=GROUND, vy=-1.0)
+    assert TASK.evaluate(at(y=GROUND + 5.0), cur, CFG) == Outcome.SUCCESS
+
+
 def test_initial_state_respects_config_ranges():
     rng = np.random.default_rng(0)
     for _ in range(50):
