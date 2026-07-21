@@ -3699,6 +3699,138 @@ git commit -m "fix: 타임아웃은 0점 — 맴돌기가 착륙 시도를 이�
 
 ---
 
+### Task 14: 난이도 사다리 재설계 — 라운드마다 축 하나씩
+
+**배경.** 100만 스텝 측정에서 `landing-easy` 12.5%, `landing-normal` 2.5%가
+나왔다. 사다리가 절벽인 이유는 두 프리셋 사이에서 **난이도 축을 여섯 개
+동시에** 올렸기 때문이다: 자세 ±5°→±45°, 고도 200→450, 하강속도 −20→−50,
+수평 ±50→±150, 바람 없음→8 m/s, 연료 무한→120.
+
+라운드마다 축을 하나씩만 올리면 학생은 무엇이 새로 어려워졌는지 알고,
+조교는 어느 축에서 막히는지 진단할 수 있다.
+
+**Files:** `rocket_env/config.py`, 모든 테스트 파일, `README.md`, 스펙 9절
+
+- [ ] **Step 1: `PRESETS` 교체**
+
+```python
+PRESETS: dict[str, dict[str, Any]] = {
+    # 라운드마다 난이도 축을 하나씩만 추가한다. 여러 축을 동시에 올리면
+    # 학생은 무엇이 새로 어려워졌는지 모르고, 조교는 어디서 막히는지
+    # 진단할 수 없다.
+    "landing-basic": {
+        "task": "landing",
+        "wind": {"mode": "none", "max_speed": 0.0},
+        "fuel": {"capacity": None},
+        "init": {"y": 200.0, "vy_range": [-20.0, -20.0],
+                 "x_range": [-50.0, 50.0], "theta_range_deg": [-5.0, 5.0]},
+    },
+    # + 자세 보정: 초기 기울기가 성공 임계(±10°)를 벗어난다.
+    "landing-attitude": {
+        "task": "landing",
+        "wind": {"mode": "none", "max_speed": 0.0},
+        "fuel": {"capacity": None},
+        "init": {"y": 200.0, "vy_range": [-20.0, -20.0],
+                 "x_range": [-50.0, 50.0], "theta_range_deg": [-30.0, 30.0]},
+    },
+    # + 고속 진입: 고도와 초기 하강속도가 올라간다.
+    "landing-descent": {
+        "task": "landing",
+        "wind": {"mode": "none", "max_speed": 0.0},
+        "fuel": {"capacity": None},
+        "init": {"y": 450.0, "vy_range": [-50.0, -40.0],
+                 "x_range": [-50.0, 50.0], "theta_range_deg": [-30.0, 30.0]},
+    },
+    # + 외란: 에피소드 내내 일정한 옆바람.
+    "landing-wind": {
+        "task": "landing",
+        "wind": {"mode": "constant", "max_speed": 8.0},
+        "fuel": {"capacity": None},
+        "init": {"y": 450.0, "vy_range": [-50.0, -40.0],
+                 "x_range": [-50.0, 50.0], "theta_range_deg": [-30.0, 30.0]},
+    },
+    # + 불확실성과 자원: 돌풍이 되고 연료가 유한해진다. 이 라운드만 축이
+    #   둘인데, 둘 다 "예측할 수 없는 조건에서 버티기"라는 한 주제다.
+    "landing-gust": {
+        "task": "landing",
+        "wind": {"mode": "gust", "max_speed": 12.0,
+                 "ou_theta": 0.15, "ou_sigma": 3.0},
+        "fuel": {"capacity": 120.0},
+        "init": {"y": 450.0, "vy_range": [-50.0, -40.0],
+                 "x_range": [-50.0, 50.0], "theta_range_deg": [-30.0, 30.0]},
+    },
+    # + 정밀 포획: 지면 대신 발사탑 팔 높이를 통과해야 한다.
+    "catch": {
+        "task": "catch",
+        "wind": {"mode": "constant", "max_speed": 5.0},
+        "fuel": {"capacity": 140.0},
+        "init": {"y": 450.0, "vy_range": [-50.0, -40.0],
+                 "x_range": [-50.0, 50.0], "theta_range_deg": [-30.0, 30.0]},
+    },
+}
+```
+
+- [ ] **Step 2: 테스트의 프리셋 이름 치환**
+
+옛 이름 → 새 이름 대응. 의미가 가장 가까운 것으로 옮긴다.
+
+| 옛 이름 | 새 이름 |
+|---------|---------|
+| `landing-easy` | `landing-basic` |
+| `landing-normal` | `landing-descent` |
+| `landing-hard` | `landing-gust` |
+| `catch-normal` | `catch` |
+| `catch-hard` | `catch` |
+
+`tests/test_config.py::test_preset_literal_values`의 파라미터 표는 새 값에
+맞춰 다시 쓴다.
+
+```python
+@pytest.mark.parametrize("name,path,expected", [
+    ("landing-basic", ("wind", "max_speed"), 0.0),
+    ("landing-basic", ("fuel", "capacity"), None),
+    ("landing-basic", ("init", "y"), 200.0),
+    ("landing-attitude", ("init", "theta_range_deg"), [-30.0, 30.0]),
+    ("landing-attitude", ("init", "y"), 200.0),
+    ("landing-descent", ("init", "y"), 450.0),
+    ("landing-descent", ("wind", "max_speed"), 0.0),
+    ("landing-wind", ("wind", "mode"), "constant"),
+    ("landing-wind", ("wind", "max_speed"), 8.0),
+    ("landing-gust", ("wind", "ou_sigma"), 3.0),
+    ("landing-gust", ("fuel", "capacity"), 120.0),
+    ("catch", ("success", "zone_r"), 6.0),
+    ("catch", ("reward", "w_speed"), 60.0),
+])
+```
+
+- [ ] **Step 3: 전체 테스트**
+
+```bash
+SDL_VIDEODRIVER=dummy uv run pytest -v
+```
+
+exploit 회귀 테스트가 새 프리셋 전부에서 돌아간다. **깨지면 상수를 만지지
+말고 보고한다.**
+
+- [ ] **Step 4: 문서 갱신**
+
+`README.md`의 프리셋 목록과 스펙 9절 프리셋 표를 새 6개로 교체한다.
+
+- [ ] **Step 5: 커밋**
+
+- [ ] **Step 6: 6개 프리셋 전수 측정 (100만 스텝)**
+
+```bash
+for p in landing-basic landing-attitude landing-descent landing-wind landing-gust catch; do
+  uv run python scripts/measure_baseline.py --preset "$p" --steps 1000000
+done
+```
+
+결과를 `docs/baselines.md`에 표로 추가한다. **숫자를 판단하거나 조정하지
+말고 그대로 기록한다.**
+
+---
+
 ## 완료 기준
 
 - [ ] `SDL_VIDEODRIVER=dummy uv run pytest -v` 전부 통과
