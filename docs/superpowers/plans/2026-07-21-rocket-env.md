@@ -4044,6 +4044,162 @@ SDL_VIDEODRIVER=dummy uv run pytest -v
 
 ---
 
+### Task 16: 개루프 정책 차단 — 초기 각속도와 판정 일관성
+
+**배경.** 최종 리뷰가 Critical 을 찾았다. 행동 `[7,7,7,1]` 반복(관찰을 전혀
+읽지 않음)이 `landing-basic` 에서 **165.92점 / 87.5% 성공**으로, 측정된 최고
+DQN 시드(159.30 / 87.5%)를 이긴다.
+
+세 선물이 겹쳤다. (1) 노즐 중앙 행동은 각속도가 0이라 `phi ≡ 0 → alpha ≡ 0`,
+즉 **θ 가 절대 변하지 않는다.** 그리고 `landing-basic` 의 θ₀ 범위 ±5°가 성공
+임계 ±10° 안쪽이라 **자세는 무조건 합격이고 잃을 수도 없다.** (2) `x_range`
+±50 이 `zone_r` 50 과 같다. (3) 듀티 `d` 의 종단속도가 `(1-d)·49.5` 라
+`d=0.75` 에서 12.4 m/s < `v_max` 15 — 개루프 끌개가 있다.
+
+**핵심 해법은 초기 각속도다.** `phi ≡ 0` 이면 `alpha ≡ 0` 이므로 ω 는 초기값이
+영원히 유지된다. 따라서 **|ω₀| 를 항상 성공 임계 밖에 두면, 짐벌을 쓰지 않는
+정책은 어떤 라운드에서도 구조적으로 0% 다.** 물리적으로도 자연스럽다 —
+귀환하는 부스터는 약간 텀블링한다.
+
+**Files:** `rocket_env/config.py`, `rocket_env/tasks/base.py`,
+`rocket_env/reward.py`, `tests/`, `README.md`, `docs/baselines.md`
+
+- [ ] **Step 1: 초기 각속도 추가**
+
+`DEFAULT_CONFIG["init"]` 에 넣는다.
+
+```python
+        # 초기 각속도의 크기 범위(deg/s). 부호는 매 에피소드 무작위.
+        # 항상 성공 임계(omega_max_deg)보다 크게 잡는다 — 노즐을 쓰지 않는
+        # 정책은 alpha ≡ 0 이라 ω 를 영원히 못 줄이므로, 이 한 줄이
+        # "관찰을 읽지 않는 개루프 정책"을 모든 라운드에서 0%로 만든다.
+        "omega_abs_range_deg": [12.0, 20.0],
+```
+
+`rocket_env/tasks/base.py` 의 `sample_initial_state` 에서 샘플링한다.
+
+```python
+    omega_deg = rng.uniform(*init["omega_abs_range_deg"])
+    if rng.random() < 0.5:
+        omega_deg = -omega_deg
+```
+
+그리고 `State(...)` 의 `omega=0.0` 을 `omega=math.radians(omega_deg)` 로 바꾼다.
+
+- [ ] **Step 2: `landing-basic` 의 수평 여유 제거**
+
+`x_range` 를 `zone_r`(50)보다 넓게 잡아 수평 제어도 필요하게 만든다.
+
+```python
+        "init": {"y": 200.0, "vy_range": [-20.0, -20.0],
+                 "x_range": [-80.0, 80.0], "theta_range_deg": [-5.0, 5.0],
+                 "omega_abs_range_deg": [12.0, 20.0]},
+```
+
+나머지 다섯 프리셋은 `omega_abs_range_deg` 를 명시하지 않고 기본값을 쓴다.
+
+- [ ] **Step 3: 개루프 정책 회귀 테스트** (가장 중요)
+
+`tests/test_exploit_regression.py` 에 추가한다. 기존 테스트는 **상수** 행동
+12개만 보고, 교대 정책은 "실패 상한이 커버한다"며 제외했다. 그 논증은 맞지만
+무관하다 — 실패 상한은 *실패하는* 에피소드를 묶는데, 이 정책은 **성공**하므로
+상한이 발동하지 않는다. 점수가 아니라 **성공률**에 상한을 걸어야 한다.
+
+```python
+OPEN_LOOP_DUTIES = (0.5, 0.6, 0.7, 0.74, 0.75, 0.8, 0.9)
+OPEN_LOOP_PHASES = (0, 1, 2, 3)
+
+
+def open_loop_policy(duty: float, phase: int, period: int = 20):
+    """관찰을 읽지 않고 추력을 주기적으로 켜고 끄는 정책."""
+    on = max(1, round(duty * period))
+
+    def act(step: int) -> int:
+        return HOVER if (step + phase) % period < on else NOOP
+
+    return act
+
+
+@pytest.mark.parametrize("preset", list(PRESETS))
+def test_open_loop_policies_cannot_pass_any_round(preset):
+    """관찰을 무시하는 정책은 어느 라운드도 통과하지 못해야 한다.
+
+    노즐을 쓰지 않으면 alpha ≡ 0 이라 ω 가 초기값 그대로 유지된다.
+    |ω₀| 를 성공 임계 밖에 두었으므로 이런 정책은 구조적으로 성공할 수 없다.
+
+    점수 상한이 아니라 성공률로 단언하는 이유: 실패 상한은 실패하는
+    에피소드만 묶는다. 성공하는 꼼수는 그 상한을 아예 건드리지 않는다.
+    """
+    for duty in OPEN_LOOP_DUTIES:
+        for phase in OPEN_LOOP_PHASES:
+            act = open_loop_policy(duty, phase)
+            wins = 0
+            for seed in SEEDS:
+                env = RocketEnv(config=PRESETS[preset])
+                env.reset(seed=seed)
+                step = 0
+                while True:
+                    _, _, terminated, truncated, info = env.step(act(step))
+                    step += 1
+                    if terminated or truncated:
+                        break
+                wins += int(info["is_success"])
+                env.close()
+            assert wins == 0, (
+                f"{preset} duty={duty} phase={phase}: {wins}/{len(SEEDS)} 성공")
+```
+
+- [ ] **Step 4: 성공 판정에서도 θ 를 래핑** (I4)
+
+`potential()` 과 실패 보상은 `_wrap_angle` 을 쓰는데 성공 판정과 성공 자세
+보너스는 안 쓴다. 그래서 관찰이 완전히 동일한 θ=0 과 θ=2π 가 239점과 38.67점으로
+갈린다. 관찰이 `sin/cos` 라 학생은 두 상태를 구별조차 할 수 없다.
+
+- `rocket_env/tasks/base.py` 의 `within_thresholds` 에서
+  `abs(state.theta)` → `abs(_wrap_angle(state.theta))`
+- `rocket_env/reward.py` 의 성공 자세 보너스도 동일하게
+
+`_wrap_angle` 은 `rocket_env/reward.py` 에 있으므로 `tasks/base.py` 가
+import 한다. reward 는 tasks 를 import 하지 않으므로 순환이 없다.
+
+테스트: θ=0 과 θ=2π 가 같은 결과를 내는지 확인한다.
+
+- [ ] **Step 5: 연료 용량 현실화** (I2)
+
+최대 소모는 `fuel_cost(2g) × max_steps = 0.1 × 800 = 80` 이다. 그런데 용량이
+120/140 이라 **어떤 프리셋에서도 연료가 떨어질 수 없다.** `OUT_OF_FUEL` 은
+전 라운드에서 죽은 코드이고, `landing-gust` 가 내세운 "유한 연료" 축은
+존재하지 않는다.
+
+`landing-gust` 는 55.0, `catch` 는 60.0 으로 낮춘다.
+
+- [ ] **Step 6: Minor 정리**
+
+- `docs/baselines.md` 재측정 명령의 `--preset landing-easy` → `landing-basic`
+  (없는 프리셋이라 `argparse` 가 즉시 거부한다)
+- `_normalize_wind` 가 모순되는 값을 조용히 0으로 만드는 대신 `ConfigError`
+  를 내게 한다. 정당한 키를 말없이 버리는 것은 `_reject_unknown_keys` 가
+  막으려던 바로 그 실패 모드다
+- `catch.x_tower` 도 세계 경계 안인지 검증한다
+- `README.md` 의 실패 보상 설명을 현재 공식으로 고치고 `TIMEOUT` 이 0점임을
+  명시한다 (I3)
+- `README.md` 와 `config.py` 의 "라운드마다 축 하나씩" 주장을 `catch` 라운드에
+  대해 완화한다 — `catch` 는 gust 를 빼고 바람을 줄이며 임계값 넷을 조이는
+  **다른 과제**이지 5라운드 + 1축이 아니다
+
+- [ ] **Step 7: 전체 테스트**
+
+```bash
+SDL_VIDEODRIVER=dummy uv run pytest -v
+```
+
+`test_shaping_bound_covers_every_preset_initial_state` 는 ω₀ 가 Φ 에 들어가지
+않으므로 영향이 없다. 다른 exploit 테스트가 깨지면 **상수를 만지지 말고 보고한다.**
+
+- [ ] **Step 8: 커밋**
+
+---
+
 ## 완료 기준
 
 - [ ] `SDL_VIDEODRIVER=dummy uv run pytest -v` 전부 통과
