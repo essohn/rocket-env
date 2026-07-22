@@ -104,7 +104,7 @@ def test_unknown_nested_key_raises_config_error():
     ("landing-basic", ("wind", "max_speed"), 0.0),
     ("landing-basic", ("fuel", "capacity"), None),
     ("landing-basic", ("init", "y"), 800.0),
-    ("landing-basic", ("init", "x_range"), [-120.0, 120.0]),
+    ("landing-basic", ("init", "x_range"), [-50.0, 50.0]),
     ("landing-basic", ("init", "omega_abs_range_deg"), [12.0, 20.0]),
     ("landing-attitude", ("init", "theta_range_deg"), [-30.0, 30.0]),
     ("landing-attitude", ("init", "y"), 800.0),

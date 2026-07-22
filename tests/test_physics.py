@@ -30,11 +30,12 @@ def make_state(**kw) -> State:
     return State(**base)
 
 
-def test_action_table_has_12_entries_in_thrust_major_order():
-    assert len(ACTION_TABLE) == 12
+def test_action_table_has_15_entries_in_thrust_major_order():
+    assert len(ACTION_TABLE) == 15
     assert ACTION_TABLE[0] == (0.0, -math.radians(120.0))
     assert ACTION_TABLE[1] == (0.0, 0.0)
-    assert ACTION_TABLE[11] == (5.0 * G, math.radians(120.0))
+    assert ACTION_TABLE[7] == (1.0 * G, 0.0)  # 호버: 추력이 중력과 정확히 상쇄
+    assert ACTION_TABLE[14] == (5.0 * G, math.radians(120.0))
 
 
 def test_single_freefall_step_matches_hand_computation():

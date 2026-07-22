@@ -121,7 +121,7 @@ PRESETS: dict[str, dict[str, Any]] = {
         "wind": {"mode": "none", "max_speed": 0.0},
         "fuel": {"capacity": None},
         "init": {"y": 800.0, "vy_range": [-30.0, -30.0],
-                 "x_range": [-120.0, 120.0], "theta_range_deg": [-5.0, 5.0],
+                 "x_range": [-50.0, 50.0], "theta_range_deg": [-5.0, 5.0],
                  "omega_abs_range_deg": [12.0, 20.0]},
     },
     # + 자세 보정: 초기 기울기가 성공 임계(±10°)를 벗어난다.
@@ -130,7 +130,7 @@ PRESETS: dict[str, dict[str, Any]] = {
         "wind": {"mode": "none", "max_speed": 0.0},
         "fuel": {"capacity": None},
         "init": {"y": 800.0, "vy_range": [-30.0, -30.0],
-                 "x_range": [-120.0, 120.0], "theta_range_deg": [-30.0, 30.0]},
+                 "x_range": [-50.0, 50.0], "theta_range_deg": [-30.0, 30.0]},
     },
     # + 고도 상승: 낙하 시작 고도가 올라가 제동을 언제 시작할지 판단할
     # 시간축이 길어진다. 항력 시상수가 약 5초라 이 고도에서는 종단속도에
@@ -140,7 +140,7 @@ PRESETS: dict[str, dict[str, Any]] = {
         "wind": {"mode": "none", "max_speed": 0.0},
         "fuel": {"capacity": None},
         "init": {"y": 1400.0, "vy_range": [-40.0, -40.0],
-                 "x_range": [-200.0, 200.0], "theta_range_deg": [-30.0, 30.0]},
+                 "x_range": [-90.0, 90.0], "theta_range_deg": [-30.0, 30.0]},
     },
     # + 외란: 에피소드 내내 일정한 옆바람.
     "landing-wind": {
@@ -148,7 +148,7 @@ PRESETS: dict[str, dict[str, Any]] = {
         "wind": {"mode": "constant", "max_speed": 8.0},
         "fuel": {"capacity": None},
         "init": {"y": 1400.0, "vy_range": [-40.0, -40.0],
-                 "x_range": [-200.0, 200.0], "theta_range_deg": [-30.0, 30.0]},
+                 "x_range": [-90.0, 90.0], "theta_range_deg": [-30.0, 30.0]},
     },
     # + 불확실성과 자원: 돌풍이 되고 연료가 유한해진다. 이 라운드만 축이
     #   둘인데, 둘 다 "예측할 수 없는 조건에서 버티기"라는 한 주제다.
@@ -161,7 +161,7 @@ PRESETS: dict[str, dict[str, Any]] = {
         # 이름뿐이었다. 55는 그 상한보다 낮아 소모 관리가 실제로 필요하다.
         "fuel": {"capacity": 70.0},
         "init": {"y": 1400.0, "vy_range": [-40.0, -40.0],
-                 "x_range": [-260.0, 260.0], "theta_range_deg": [-30.0, 30.0]},
+                 "x_range": [-120.0, 120.0], "theta_range_deg": [-30.0, 30.0]},
     },
     # + 정밀 포획: 지면 대신 발사탑 팔 높이를 통과해야 한다. 다른 다섯
     # 라운드와 달리 이 라운드는 축을 하나만 얹는 게 아니라 아예 다른
@@ -173,7 +173,7 @@ PRESETS: dict[str, dict[str, Any]] = {
         # 60은 fuel_cost(2g) * max_steps = 80 보다 낮아 소모 관리가 필요하다.
         "fuel": {"capacity": 80.0},
         "init": {"y": 1400.0, "vy_range": [-40.0, -40.0],
-                 "x_range": [-200.0, 200.0], "theta_range_deg": [-30.0, 30.0]},
+                 "x_range": [-90.0, 90.0], "theta_range_deg": [-30.0, 30.0]},
     },
 }
 

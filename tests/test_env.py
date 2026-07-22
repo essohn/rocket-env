@@ -54,7 +54,7 @@ def test_spaces_match_the_contract():
     env = RocketEnv()
     assert env.observation_space.shape == (OBS_DIM,)
     assert env.observation_space.dtype == np.float32
-    assert env.action_space.n == 12
+    assert env.action_space.n == 15
 
 
 def test_observation_is_finite_and_correctly_typed():
