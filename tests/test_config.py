@@ -104,16 +104,20 @@ def test_unknown_nested_key_raises_config_error():
     ("landing-basic", ("wind", "max_speed"), 0.0),
     ("landing-basic", ("fuel", "capacity"), None),
     ("landing-basic", ("init", "y"), 200.0),
+    ("landing-basic", ("init", "x_range"), [-80.0, 80.0]),
+    ("landing-basic", ("init", "omega_abs_range_deg"), [12.0, 20.0]),
     ("landing-attitude", ("init", "theta_range_deg"), [-30.0, 30.0]),
     ("landing-attitude", ("init", "y"), 200.0),
+    ("landing-attitude", ("init", "omega_abs_range_deg"), [12.0, 20.0]),
     ("landing-descent", ("init", "y"), 450.0),
     ("landing-descent", ("wind", "max_speed"), 0.0),
     ("landing-wind", ("wind", "mode"), "constant"),
     ("landing-wind", ("wind", "max_speed"), 8.0),
     ("landing-gust", ("wind", "ou_sigma"), 3.0),
-    ("landing-gust", ("fuel", "capacity"), 120.0),
+    ("landing-gust", ("fuel", "capacity"), 55.0),
     ("catch", ("success", "zone_r"), 6.0),
     ("catch", ("reward", "w_speed"), 60.0),
+    ("catch", ("fuel", "capacity"), 60.0),
 ])
 def test_preset_literal_values(name, path, expected):
     """프리셋 리터럴을 고정한다.
@@ -165,10 +169,29 @@ def test_wind_mode_none_forces_zero_wind():
     assert cfg["wind"]["ou_sigma"] == 0.0
 
 
-def test_wind_mode_constant_clears_the_ou_terms():
-    cfg = build_config({"wind": {"mode": "constant", "max_speed": 5.0,
-                                 "ou_sigma": 3.0}})
+def test_wind_mode_constant_clears_the_inherited_ou_defaults():
+    """사용자가 ou_* 를 명시하지 않으면 상속된 기본값을 조용히 0으로 채운다."""
+    cfg = build_config({"wind": {"mode": "constant", "max_speed": 5.0}})
+    assert cfg["wind"]["ou_theta"] == 0.0
     assert cfg["wind"]["ou_sigma"] == 0.0
+
+
+def test_wind_mode_constant_with_explicit_ou_sigma_raises_config_error():
+    """명시적으로 지정한 ou_sigma 를 mode='constant' 가 조용히 버리면 안 된다.
+
+    Task 16 이전에는 이 값을 말없이 0으로 덮어써서, 오타나 착각으로 mode를
+    "constant"로 둔 채 ou_sigma 를 만졌을 때 아무 신호도 없었다. 정당한
+    키를 말없이 버리는 것은 _reject_unknown_keys 가 막으려던 바로 그
+    실패 모드다.
+    """
+    with pytest.raises(ConfigError, match="ou_sigma"):
+        build_config({"wind": {"mode": "constant", "max_speed": 5.0,
+                               "ou_sigma": 3.0}})
+
+
+def test_wind_mode_none_with_explicit_max_speed_raises_config_error():
+    with pytest.raises(ConfigError, match="max_speed"):
+        build_config({"wind": {"mode": "none", "max_speed": 5.0}})
 
 
 def test_gust_without_sigma_raises_config_error():
@@ -196,6 +219,22 @@ def test_init_x_range_outside_world_bounds_raises_config_error():
 def test_catch_y_arm_out_of_bounds_raises_config_error():
     with pytest.raises(ConfigError, match="catch.y_arm"):
         build_config({"catch": {"y_arm": 900.0}})
+
+
+def test_catch_x_tower_out_of_bounds_raises_config_error():
+    with pytest.raises(ConfigError, match="catch.x_tower"):
+        build_config({"catch": {"x_tower": 900.0}})
+
+
+def test_init_omega_abs_range_deg_scalar_raises_config_error():
+    with pytest.raises(ConfigError, match="omega_abs_range_deg"):
+        build_config({"init": {"omega_abs_range_deg": 12.0}})
+
+
+def test_init_omega_abs_range_deg_nonpositive_lower_bound_raises_config_error():
+    """하한이 0 이하면 개루프 정책이 |omega|=0 을 뽑을 수 있어 무의미하다."""
+    with pytest.raises(ConfigError, match="omega_abs_range_deg"):
+        build_config({"init": {"omega_abs_range_deg": [0.0, 20.0]}})
 
 
 @pytest.mark.parametrize("name", [

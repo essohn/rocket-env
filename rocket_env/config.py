@@ -42,6 +42,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "vy_range": [-60.0, -50.0],
         "x_range": [-150.0, 150.0],
         "theta_range_deg": [-45.0, 45.0],
+        # 초기 각속도의 크기 범위(deg/s). 부호는 매 에피소드 무작위.
+        # 항상 성공 임계(omega_max_deg)보다 크게 잡는다 — 노즐을 쓰지 않는
+        # 정책은 alpha ≡ 0 이라 ω 를 영원히 못 줄이므로, 이 한 줄이
+        # "관찰을 읽지 않는 개루프 정책"을 모든 라운드에서 0%로 만든다.
+        "omega_abs_range_deg": [12.0, 20.0],
     },
 
     "success": {
@@ -89,15 +94,16 @@ CATCH_OVERRIDES: dict[str, Any] = {
 }
 
 PRESETS: dict[str, dict[str, Any]] = {
-    # 라운드마다 난이도 축을 하나씩만 추가한다. 여러 축을 동시에 올리면
-    # 학생은 무엇이 새로 어려워졌는지 모르고, 조교는 어디서 막히는지
-    # 진단할 수 없다.
+    # landing 다섯 라운드는 난이도 축을 하나씩만 추가한다. 여러 축을
+    # 동시에 올리면 학생은 무엇이 새로 어려워졌는지 모르고, 조교는 어디서
+    # 막히는지 진단할 수 없다. catch는 이 규칙 밖이다 — 아래 주석 참고.
     "landing-basic": {
         "task": "landing",
         "wind": {"mode": "none", "max_speed": 0.0},
         "fuel": {"capacity": None},
         "init": {"y": 200.0, "vy_range": [-20.0, -20.0],
-                 "x_range": [-50.0, 50.0], "theta_range_deg": [-5.0, 5.0]},
+                 "x_range": [-80.0, 80.0], "theta_range_deg": [-5.0, 5.0],
+                 "omega_abs_range_deg": [12.0, 20.0]},
     },
     # + 자세 보정: 초기 기울기가 성공 임계(±10°)를 벗어난다.
     "landing-attitude": {
@@ -129,15 +135,22 @@ PRESETS: dict[str, dict[str, Any]] = {
         "task": "landing",
         "wind": {"mode": "gust", "max_speed": 12.0,
                  "ou_theta": 0.15, "ou_sigma": 3.0},
-        "fuel": {"capacity": 120.0},
+        # 최대 소모는 fuel_cost(2g) * max_steps = 0.1 * 800 = 80 이다.
+        # 120 이면 어떤 정책도 연료가 바닥날 수 없어 "유한 연료" 축이
+        # 이름뿐이었다. 55는 그 상한보다 낮아 소모 관리가 실제로 필요하다.
+        "fuel": {"capacity": 55.0},
         "init": {"y": 450.0, "vy_range": [-50.0, -40.0],
                  "x_range": [-50.0, 50.0], "theta_range_deg": [-30.0, 30.0]},
     },
-    # + 정밀 포획: 지면 대신 발사탑 팔 높이를 통과해야 한다.
+    # + 정밀 포획: 지면 대신 발사탑 팔 높이를 통과해야 한다. 다른 다섯
+    # 라운드와 달리 이 라운드는 축을 하나만 얹는 게 아니라 아예 다른
+    # 과제다 — gust를 빼고 바람을 줄이는 대신 성공 임계값 넷(속도·위치·
+    # 자세·각속도)을 모두 조인다.
     "catch": {
         "task": "catch",
         "wind": {"mode": "constant", "max_speed": 5.0},
-        "fuel": {"capacity": 140.0},
+        # 60은 fuel_cost(2g) * max_steps = 80 보다 낮아 소모 관리가 필요하다.
+        "fuel": {"capacity": 60.0},
         "init": {"y": 450.0, "vy_range": [-50.0, -40.0],
                  "x_range": [-50.0, 50.0], "theta_range_deg": [-30.0, 30.0]},
     },
@@ -218,23 +231,36 @@ def build_config(user_config: dict | None) -> dict:
         cfg = _deep_merge(cfg, CATCH_OVERRIDES)
     cfg = _deep_merge(cfg, user)
 
-    _normalize_wind(cfg)
+    _normalize_wind(cfg, user.get("wind", {}))
     _validate_ranges(cfg)
     return cfg
 
 
-def _normalize_wind(cfg: dict) -> None:
+def _normalize_wind(cfg: dict, user_wind: dict) -> None:
     """mode 가 실제 동작을 결정하도록 동반 값을 맞춘다.
 
     WindProcess 는 mode 를 읽지 않고 max_speed/ou_theta/ou_sigma 만 본다.
-    여기서 맞춰주지 않으면 mode 는 장식일 뿐이고, 오설정이 조용히 통과한다.
+    사용자가 명시하지 않은 값(기본값 상속)은 조용히 채워 넣지만, 사용자가
+    명시적으로 지정한 값이 mode 와 모순되면 조용히 0으로 덮지 않고
+    ConfigError 를 낸다 — 정당한 키를 말없이 버리는 것은 `_reject_unknown_keys`
+    가 막으려던 바로 그 실패 모드다.
     """
     wind = cfg["wind"]
     if wind["mode"] == "none":
+        for key in ("max_speed", "ou_theta", "ou_sigma"):
+            if key in user_wind and user_wind[key] != 0.0:
+                raise ConfigError(
+                    f"wind.mode='none' 인데 wind.{key}={user_wind[key]!r} 로 "
+                    "모순됩니다. mode를 바꾸거나 값을 0으로 하세요.")
         wind["max_speed"] = 0.0
         wind["ou_theta"] = 0.0
         wind["ou_sigma"] = 0.0
     elif wind["mode"] == "constant":
+        for key in ("ou_theta", "ou_sigma"):
+            if key in user_wind and user_wind[key] != 0.0:
+                raise ConfigError(
+                    f"wind.mode='constant' 인데 wind.{key}={user_wind[key]!r} "
+                    "로 모순됩니다. mode='gust'를 쓰거나 값을 0으로 하세요.")
         wind["ou_theta"] = 0.0
         wind["ou_sigma"] = 0.0
     elif wind["mode"] == "gust" and wind["ou_sigma"] <= 0.0:
@@ -277,7 +303,7 @@ def _validate_ranges(cfg: dict) -> None:
     if not ground < init["y"] < ceiling:
         raise ConfigError(
             f"init.y는 {ground}와 {ceiling} 사이여야 합니다: {init['y']}")
-    for key in ("x_range", "vy_range", "theta_range_deg"):
+    for key in ("x_range", "vy_range", "theta_range_deg", "omega_abs_range_deg"):
         pair = init[key]
         if not (isinstance(pair, (list, tuple)) and len(pair) == 2
                 and pair[0] <= pair[1]):
@@ -286,10 +312,19 @@ def _validate_ranges(cfg: dict) -> None:
     if not (WORLD_X_MIN < init["x_range"][0]
             and init["x_range"][1] < WORLD_X_MAX):
         raise ConfigError(f"init.x_range가 세계 경계를 벗어납니다: {init['x_range']}")
+    # 하한이 양수가 아니면 개루프(짐벌 미사용) 정책이 |omega|=0 을 뽑을 수
+    # 있어, 이 범위를 두는 이유(성공 임계 밖으로 못 벗어나게 하기)가 깨진다.
+    if init["omega_abs_range_deg"][0] <= 0:
+        raise ConfigError(
+            f"init.omega_abs_range_deg의 최솟값은 양수여야 합니다: "
+            f"{init['omega_abs_range_deg']!r}")
     if not ground < cfg["catch"]["y_arm"] < ceiling:
         raise ConfigError(
             f"catch.y_arm은 {ground}와 {ceiling} 사이여야 합니다: "
             f"{cfg['catch']['y_arm']}")
+    if not WORLD_X_MIN < cfg["catch"]["x_tower"] < WORLD_X_MAX:
+        raise ConfigError(
+            f"catch.x_tower가 세계 경계를 벗어납니다: {cfg['catch']['x_tower']}")
 
 
 def validate_train_config(train_cfg: dict,

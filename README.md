@@ -44,7 +44,9 @@ env = gym.make("rocket-v0", config=PRESETS["catch"])
 ```
 
 `landing-basic`, `landing-attitude`, `landing-descent`, `landing-wind`,
-`landing-gust`, `catch`. 라운드마다 난이도 축을 하나씩만 추가한다.
+`landing-gust`, `catch`. landing 다섯 라운드는 난이도 축을 하나씩만
+추가한다. `catch`는 이 규칙 밖이다 — gust를 빼고 바람을 줄이는 대신
+성공 임계값 넷(속도·위치·자세·각속도)을 모두 조이는 다른 과제다.
 
 ## 관찰과 행동
 
@@ -67,7 +69,11 @@ env = gym.make("rocket-v0", config=PRESETS["catch"])
 - 스텝: 잠재함수 기반 shaping(PBRS) + 연료 패널티. `shaping_gamma=1.0`이라 총합이
   정확히 `Φ(s_T) - Φ(s_0)`로 접혀 에피소드 길이가 점수에 영향을 주지 않는다.
 - 성공: 기본점 100 + 접촉 속도 / 위치 정밀도 / 자세 / 잔여 연료 / 시간 효율 보너스 (최대 250).
-- 실패: 목표를 향한 진행도에 비례 (0–40). 시간 항이 없으므로 조기 종료가 이득이 되지 않는다.
+- 실패(CRASH/MISSED/OUT_OF_FUEL): 성공 판정에 쓰는 다섯 조건(위치·속도·자세·
+  각속도) 각각에 대한 근접도 중 가장 나쁜 것으로 채점한다 (0–40). 시간 항이
+  없으므로 조기 종료가 이득이 되지 않는다.
+- 실패(TIMEOUT): 항상 0점이다. 판정 지점에 가지 않고 시간이 다 되도록
+  맴돌기만 하면 시도 자체를 하지 않은 것으로 본다.
 
 `config["reward"]`의 가중치는 전부 조정 가능하다. 학습용 보상을 자유롭게 설계하되,
 채점은 서버가 정한 평가 설정으로 이뤄진다.

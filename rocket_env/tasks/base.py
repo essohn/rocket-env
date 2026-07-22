@@ -14,6 +14,7 @@ from rocket_env.physics import (
     WORLD_X_MIN,
     WORLD_Y_MAX,
 )
+from rocket_env.reward import _wrap_angle
 from rocket_env.types import State
 
 GROUND_Y = ROCKET_HEIGHT / 2.0     # 로켓 중심이 지면에 닿는 높이
@@ -40,13 +41,18 @@ def sample_initial_state(rng: np.random.Generator, cfg: dict) -> State:
     """두 태스크가 동일한 초기 조건 분포를 쓴다."""
     init = cfg["init"]
     capacity = cfg["fuel"]["capacity"]
+
+    omega_deg = rng.uniform(*init["omega_abs_range_deg"])
+    if rng.random() < 0.5:
+        omega_deg = -omega_deg
+
     return State(
         x=float(rng.uniform(*init["x_range"])),
         y=float(init["y"]),
         vx=0.0,
         vy=float(rng.uniform(*init["vy_range"])),
         theta=math.radians(float(rng.uniform(*init["theta_range_deg"]))),
-        omega=0.0,
+        omega=math.radians(omega_deg),
         phi=0.0,
         thrust=0.0,
         fuel=math.inf if capacity is None else float(capacity),
@@ -68,5 +74,5 @@ def within_thresholds(state: State, cfg: dict, dx: float) -> bool:
     speed = math.hypot(state.vx, state.vy)
     return (abs(dx) < s["zone_r"]
             and speed < s["v_max"]
-            and abs(state.theta) < math.radians(s["theta_max_deg"])
+            and abs(_wrap_angle(state.theta)) < math.radians(s["theta_max_deg"])
             and abs(state.omega) < math.radians(s["omega_max_deg"]))

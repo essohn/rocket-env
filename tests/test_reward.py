@@ -99,6 +99,16 @@ def test_high_hover_timeout_scores_zero():
     assert r == pytest.approx(0.0)
 
 
+def test_success_attitude_bonus_is_the_same_for_theta_zero_and_two_pi():
+    """관찰이 sin/cos 라 θ=0 과 θ=2π 를 구별 못 하므로 점수도 같아야 한다."""
+    upright = terminal_reward(Outcome.SUCCESS, at(x=0.0, y=25.0, theta=0.0),
+                              TARGET, CFG, fuel_frac=1.0)
+    spun = terminal_reward(Outcome.SUCCESS,
+                           at(x=0.0, y=25.0, theta=2.0 * math.pi),
+                           TARGET, CFG, fuel_frac=1.0)
+    assert spun == pytest.approx(upright)
+
+
 def test_near_miss_scores_half_the_failure_maximum():
     """임계값 정확히 위에서 실패하면 절반을 받는다."""
     s = CFG["success"]

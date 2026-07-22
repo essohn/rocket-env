@@ -94,6 +94,22 @@ def test_touchdown_exactly_at_spin_threshold_crashes():
     assert TASK.evaluate(at(y=GROUND + 5.0), cur, CFG) == Outcome.CRASH
 
 
+def test_theta_zero_and_two_pi_give_the_same_verdict():
+    """관찰이 sin/cos 라 θ=0 과 θ=2π 를 구별할 수 없다 — 판정도 같아야 한다.
+
+    Task 16 이전에는 성공 판정이 `_wrap_angle` 을 쓰지 않아 두 상태의
+    outcome 이 달랐다(성공 vs 실패). 물리는 θ 를 감지 않으므로 여러 바퀴
+    돌고 착지하면 |θ| 가 그대로 누적되는데, 관찰로는 절대 구별할 수 없는
+    두 상태가 다른 채점을 받는 것은 비마르코프적이다.
+    """
+    upright = at(y=GROUND - 0.1, vy=-1.0, theta=0.0)
+    spun = at(y=GROUND - 0.1, vy=-1.0, theta=2.0 * math.pi)
+    prev = at(y=GROUND + 5.0)
+    assert (TASK.evaluate(prev, upright, CFG)
+            == TASK.evaluate(prev, spun, CFG)
+            == Outcome.SUCCESS)
+
+
 def test_ground_contact_triggers_exactly_at_ground_level():
     """접지 판정만 `<=` 다 — 정확히 지면 높이에 닿으면 접지로 본다."""
     cur = at(y=GROUND, vy=-1.0)

@@ -125,7 +125,7 @@
 
 ```bash
 uv pip install -e ".[sb3]"
-uv run python scripts/measure_baseline.py --preset landing-easy --steps 1000000 --seeds 5
+uv run python scripts/measure_baseline.py --preset landing-basic --steps 1000000 --seeds 5
 ```
 
 프리셋을 바꾸거나 `reward.*`를 건드린 뒤에는 반드시 다시 잰다. `--seeds`는

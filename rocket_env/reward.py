@@ -39,7 +39,15 @@ def _wrap_angle(theta: float) -> float:
     물리는 θ 를 감지 않으므로 여러 바퀴 돈 상태에서 |θ| 가 계속 커진다.
     반면 관찰은 sin/cos 라 감김 횟수를 볼 수 없다. 보상만 그것에 의존하면
     관찰로 구분할 수 없는 두 상태가 다른 값을 가져 비마르코프가 된다.
+
+    이미 (-π, π] 안에 있는 값은 그대로 돌려준다. `(theta + π) % 2π - π`는
+    수학적으로 항등식이지만, 부동소수점에서는 π를 더했다 빼는 과정에서
+    반올림 오차가 생겨 경계값(예: 정확히 theta_max_deg)에서 '같다'가
+    '근소하게 작다'로 바뀔 수 있다. 실제로 감아야 하는 경우(여러 바퀴 돈
+    상태)에만 모듈로 연산을 타도록 분기해 흔한 경로의 정밀도를 지킨다.
     """
+    if -math.pi < theta <= math.pi:
+        return theta
     return (theta + math.pi) % (2.0 * math.pi) - math.pi
 
 
@@ -83,7 +91,8 @@ def terminal_reward(outcome: str, state: State, target: tuple[float, float],
             + r["w_speed"] * math.exp(-speed / r["v_ref"])
             + r["w_position"] * max(0.0, 1.0 - dx / s["zone_r"])
             + r["w_attitude"] * max(
-                0.0, 1.0 - abs(state.theta) / math.radians(s["theta_max_deg"]))
+                0.0, 1.0 - abs(_wrap_angle(state.theta))
+                / math.radians(s["theta_max_deg"]))
             + r["w_fuel"] * fuel_frac
             + r["w_time"] * (1.0 - state.step / cfg["max_steps"])
         )
