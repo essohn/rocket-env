@@ -86,12 +86,18 @@ JAW_OPEN_SPREAD = 15.0    # 벌어졌을 때 팁의 수직 벌어짐 (m)
 JAW_CLOSE_SPREAD = 4.0    # 다 조였을 때 (m)
 JAW_TRUSS_HALF = 1.5      # 젓가락 트러스 폭의 절반 (m) — 본체보다 가늘다
 JAW_TRUSS_BAY = 6.0
+# 젓가락을 판정 높이보다 조금 위에 그린다. 순전히 연출용 오프셋이며,
+# 판정 높이 자체는 그대로다 — 실제 포획 범위 표시선은 아래 y_arm 에
+# 그대로 남겨 "그려진 것과 판정되는 것"이 어긋나지 않게 한다.
+JAW_Y_OFFSET = 5.0
 # 로켓이 이만큼 위로 접근하면 집게가 오므라들기 시작한다. 잡히는 순간에만
 # 닫히면 동작이 보이지 않는다.
-GRIP_APPROACH_RANGE = 45.0
-# 접근 중에는 여기까지만 닫는다. 다 닫아버리면 포획 직후 마무리 연출이
-# 0부터 다시 램프해 젓가락이 한 번 벌어졌다 닫히는 것처럼 보인다.
-GRIP_APPROACH_MAX = 0.45
+GRIP_APPROACH_RANGE = 75.0
+# 접근 중에 대부분 닫는다. 예전 값(0.45)은 절반 이상을 포획 후 연출로
+# 미뤄서, 로켓이 멎은 다음에야 젓가락이 좁혀지는 것처럼 보였다. 실제
+# Mechazilla 도 부스터가 다가오는 동안 팔을 미리 좁힌다. 나머지 15%는
+# 걸린 뒤 마저 조여 "고정"되는 느낌을 준다.
+GRIP_APPROACH_MAX = 0.85
 GRIP_ALIGN_RANGE = 3.0    # 수평 정렬이 이 배수 안이어야 닫기 시작한다
 BODY_COLOR = (232, 234, 238)
 BODY_HALF_W = 4.2          # 원통 반지름 (m)
@@ -103,7 +109,7 @@ PIN_COLOR = (176, 182, 194)
 # 포획 후 미끄러져 내려앉는 거리. 걸림쇠 높이(PIN_Y) 전체만큼 내리면
 # 기체가 팔 한참 아래로 매달려 "너무 밑에서 걸린" 것처럼 보인다.
 # 걸린 자리가 상단 가까이 남도록 짧게 잡는다.
-SETTLE_DROP = 9.0
+SETTLE_DROP = 4.5
 FIN_COLOR = (120, 125, 135)
 TRAIL_COLOR = (90, 160, 220)
 HUD_COLOR = (225, 230, 240)
@@ -380,16 +386,20 @@ class Renderer:
         mast_x = x_tower - TOWER_OFFSET
         mast_top = y_arm * TOWER_HEIGHT_FACTOR
 
+        # 가로보는 그리지 않는다. 젓가락 자체가 마스트에서 뻗어 나오므로
+        # 뒤에 수평 트러스를 하나 더 두면 의미 없이 겹쳐 보인다.
         self._truss_mast(mast_x, mast_top)
-        self._truss_beam(mast_x, x_tower + arm_half, y_arm)
 
         # 실제 포획 판정 범위(±zone_r). 이걸 따로 그리지 않으면 학생은
         # 팔 안쪽으로 잘 지나간 것처럼 보이는데 MISSED 가 뜨는 이유를
         # 알 수 없다. 디버깅하라고 만든 그림이 디버깅을 방해하게 된다.
+        # 실제 포획 판정 범위(±zone_r)를 얇게 표시한다. 구조물처럼 굵게
+        # 그리면 젓가락과 헷갈리지만, 아예 지우면 학생이 "팔 안쪽으로
+        # 지나간 것 같은데 왜 MISSED 인지"를 알 수 없다.
         pygame.draw.line(self.surface, ARM_COLOR,
                          self._to_px(x_tower - window_half, y_arm),
                          self._to_px(x_tower + window_half, y_arm),
-                         self._scaled_width(11.0))
+                         self._scaled_width(2.5, min_px=1))
 
         # 뒤쪽 팔만 여기서 그린다. 앞쪽 팔은 로켓을 그린 뒤에 덧그려야
         # 로켓이 두 팔 사이에 물린 것처럼 보인다 — 한 겹으로 그리면
@@ -473,7 +483,8 @@ class Renderer:
         spread = JAW_OPEN_SPREAD + (JAW_CLOSE_SPREAD - JAW_OPEN_SPREAD) * grip
         sign = -1.0 if front else 1.0
         color = JAW_COLOR if front else JAW_BACK_COLOR
-        self._truss_line(pivot_x, y_arm, tip_x, y_arm + sign * spread,
+        base_y = y_arm + JAW_Y_OFFSET
+        self._truss_line(pivot_x, base_y, tip_x, base_y + sign * spread,
                          JAW_TRUSS_HALF, JAW_TRUSS_BAY, color)
 
     def _front_arm(self, target: tuple[float, float], grip: float) -> None:

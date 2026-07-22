@@ -279,7 +279,7 @@ def test_jaws_close_as_grip_increases():
     벌어짐이다. 내부 공식을 재계산하지 않고 실제로 그려진 JAW_COLOR
     픽셀의 수직 퍼짐을 잰다 — 그래야 무엇이 그려지는지 검증한 것이 된다.
     """
-    from rocket_env.render import JAW_COLOR
+    from rocket_env.render import JAW_COLOR, JAW_Y_OFFSET
 
     cfg = build_config(PRESETS["catch"])
     renderer = Renderer(cfg, "rgb_array")
@@ -291,7 +291,9 @@ def test_jaws_close_as_grip_increases():
         frame = renderer.draw(state, target, Outcome.IN_PROGRESS, grip=grip)
         ys, _ = np.where(np.all(frame == JAW_COLOR, axis=-1))
         assert ys.size > 0, "젓가락이 화면에 그려지지 않았다"
-        pivot_y = renderer._to_px(*target)[1]
+        # 기준은 판정 높이가 아니라 젓가락의 피봇 높이다 — 젓가락은
+        # 연출상 JAW_Y_OFFSET 만큼 위에 그려진다.
+        pivot_y = renderer._to_px(target[0], target[1] + JAW_Y_OFFSET)[1]
         return int(np.max(np.abs(ys - pivot_y)))
 
     wide = vertical_spread_px(0.0)
