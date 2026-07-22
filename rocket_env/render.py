@@ -27,13 +27,18 @@ WIDTH, HEIGHT = 640, 960
 
 # --- 카메라 ---
 MIN_SCALE = WIDTH / (WORLD_X_MAX - WORLD_X_MIN)   # 세계 전체 폭이 보이는 최소 배율
-MAX_SCALE = 6.0                                    # 최대 줌
+MAX_SCALE = 14.0                                   # 최대 줌
 CAMERA_SMOOTHING = 0.12                            # 0에 가까울수록 부드럽다(느리다)
 
 # --- 연기 입자 ---
-MAX_PARTICLES = 500
-PARTICLE_LIFE = 1.2          # 초
+MAX_PARTICLES = 700
+PARTICLE_LIFE = 1.2          # 초 — 연기
 SMOKE_COLOR = (215, 215, 225)
+
+# 부스러기/먼지. 연기와 달리 빠르게 튀어나가 금방 사라진다. 연기만 있으면
+# 배기가 뭉근하게 보여서 추력의 격렬함이 전달되지 않는다.
+DEBRIS_LIFE = 0.35           # 초
+DEBRIS_COLOR = (250, 226, 190)
 
 # --- 구름 ---
 # 배경이 단색 그라디언트뿐이면 34 m/s 로 떨어지든 2 m/s 로 기어가든 화면상
@@ -42,13 +47,22 @@ SMOKE_COLOR = (215, 215, 225)
 CLOUD_COUNT = 34
 CLOUD_COLOR = (238, 242, 250)
 CLOUD_SEED = 20260722
+# 일부 구름은 카메라에 더 가깝게 둔다 — 로켓보다 앞에 그리고, 카메라
+# 중심에서의 화면 오프셋을 시차 계수만큼 부풀린다. 원경 구름만 있으면
+# 배경이 평평해서 깊이가 느껴지지 않는다.
+CLOUD_FRONT_RATIO = 0.3
+CLOUD_FRONT_PARALLAX = 1.7
 
 # --- 타워(포획) ---
 # 마스트를 포획 지점(x_tower)에서 왼쪽으로 물려 그린다 — 물리 목표는
 # 그대로 x_tower 다, 그림만 옆으로 옮긴다. 실제 Mechazilla가 타워 옆에서
 # 팔을 뻗어 붙잡는 모습을 흉내낸다.
-TOWER_OFFSET = 55.0
-TOWER_HEIGHT_FACTOR = 1.6
+# 실물 비율: Super Heavy 71 m, 발사탑 146 m(2.06배), 팔 길이 약 40 m(0.56배),
+# 부스터 중심선과 타워 간격 약 30 m(0.42배). 로켓이 50 m 이므로 각각
+# 103 m / 28 m / 21 m 가 된다. 예전 값(이격 55 m, 가로보 총 100 m)은 팔이
+# 로켓 길이의 2배로, 실물의 3.5배였다.
+TOWER_OFFSET = 21.0
+TOWER_HEIGHT_FACTOR = 1.3
 
 SKY_TOP = (12, 18, 40)
 SKY_BOTTOM = (70, 96, 140)
@@ -127,7 +141,7 @@ class Renderer:
         self._update_particles(draw_state)
 
         self.surface.blit(self._sky_surface, (0, 0))
-        self._draw_clouds()
+        self._draw_clouds(front=False)      # 원경 구름 — 배경
         self._ground()
         self._structure(target, grip)
         self._draw_particles()
@@ -135,6 +149,9 @@ class Renderer:
         self.trail.append(self._to_px(draw_state.x, draw_state.y))
         self._trail()
         self._rocket(draw_state)
+        # 전경 구름은 로켓보다 카메라에 가까우므로 기체 위에 덮인다.
+        # 가끔 로켓을 스쳐 지나가며 깊이감을 만든다.
+        self._draw_clouds(front=True)
         self._hud(state)
 
         if outcome != Outcome.IN_PROGRESS:
@@ -181,8 +198,11 @@ class Renderer:
         """로켓과 목표가 모두 여유 있게 들어오는 (중심x, 중심y, 배율)."""
         cx = (state.x + target[0]) / 2.0
         cy = (state.y + target[1]) / 2.0
-        span_x = abs(state.x - target[0]) + 6.0 * ROCKET_HEIGHT
-        span_y = abs(state.y - target[1]) + 6.0 * ROCKET_HEIGHT
+        # 여백이 로켓 6개 길이(300 m)나 되면 로켓이 화면에서 점만 해진다.
+        # 2.2배(110 m)로 좁혀 기체를 크게 잡고, 배경이 빠르게 흘러 속도감도
+        # 커진다.
+        span_x = abs(state.x - target[0]) + 2.2 * ROCKET_HEIGHT
+        span_y = abs(state.y - target[1]) + 2.2 * ROCKET_HEIGHT
         scale = min(WIDTH / span_x, HEIGHT / span_y)
         return cx, cy, min(max(scale, MIN_SCALE), MAX_SCALE)
 
@@ -241,6 +261,8 @@ class Renderer:
                 # 덩어리가 되어 먹구름처럼 읽힌다. 충분히 올려야 의도한
                 # 밝은 색이 나온다.
                 "alpha": int(rng.integers(150, 215)),
+                # 앞쪽 구름은 더 크고 진하게 — 가까이 있다는 인상을 준다
+                "front": bool(rng.random() < CLOUD_FRONT_RATIO),
                 # 뭉게구름처럼 보이도록 원을 몇 개 겹친다
                 "puffs": [(float(rng.uniform(-1.3, 1.3)) * r,
                            float(rng.uniform(-0.35, 0.35)) * r,
@@ -248,23 +270,39 @@ class Renderer:
             })
         return clouds
 
-    def _draw_clouds(self) -> None:
+    def _cloud_px(self, cloud: dict) -> tuple[int, int]:
+        """구름의 화면 좌표. 앞쪽 구름은 카메라 중심에서의 오프셋을
+        시차 계수만큼 부풀려, 카메라가 움직일 때 더 빨리 흐르게 한다 —
+        가까이 있는 물체가 빨리 지나가는 실제 시차를 흉내낸다."""
+        px, py = self._to_px(cloud["x"], cloud["y"])
+        if not cloud["front"]:
+            return px, py
+        k = CLOUD_FRONT_PARALLAX
+        return (int(WIDTH / 2 + (px - WIDTH / 2) * k),
+                int(HEIGHT / 2 + (py - HEIGHT / 2) * k))
+
+    def _draw_clouds(self, front: bool = False) -> None:
         # 연기 입자와 같은 이유로, 알파 서피스 한 장에 전부 그린 뒤 한 번만
         # blit한다 — 구름마다 서피스를 새로 만들면 18개를 매 프레임 blit
         # 하게 되어 낭비다.
         _, _, scale = self._cam
         overlay = None
         for cloud in self._clouds:
-            cx, cy = self._to_px(cloud["x"], cloud["y"])
-            reach = int(cloud["r"] * 1.5 * scale) + 20
+            if cloud["front"] != front:
+                continue
+            cx, cy = self._cloud_px(cloud)
+            size = cloud["r"] * (1.6 if front else 1.0)
+            reach = int(size * 1.5 * scale) + 20
             if cx + reach < 0 or cx - reach > WIDTH or cy + reach < 0 or cy - reach > HEIGHT:
                 continue  # 화면 밖 구름은 건너뛴다
             if overlay is None:
                 overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-            color = (*CLOUD_COLOR, cloud["alpha"])
+            grow = 1.6 if front else 1.0
+            alpha = min(255, int(cloud["alpha"] * (1.25 if front else 1.0)))
+            color = (*CLOUD_COLOR, alpha)
             for dx, dy, pr in cloud["puffs"]:
-                center = (cx + int(dx * scale), cy + int(dy * scale))
-                radius = max(2, int(pr * scale))
+                center = (cx + int(dx * grow * scale), cy + int(dy * grow * scale))
+                radius = max(2, int(pr * grow * scale))
                 pygame.draw.circle(overlay, color, center, radius)
         if overlay is not None:
             self.surface.blit(overlay, (0, 0))
@@ -353,7 +391,7 @@ class Renderer:
         """
         x_tower, y_arm = target
         window_half = self.cfg["success"]["zone_r"]
-        return x_tower, y_arm, max(window_half * 3.0, 18.0), window_half
+        return x_tower, y_arm, max(window_half * 1.4, 12.0), window_half
 
     def _trail(self) -> None:
         if len(self.trail) < 2:
@@ -368,11 +406,12 @@ class Renderer:
         for p in self._particles:
             p["x"] += p["vx"] * DT
             p["y"] += p["vy"] * DT
-            p["vx"] *= 0.88
-            p["vy"] *= 0.88
+            drag = 0.88 if p["kind"] == "smoke" else 0.97
+            p["vx"] *= drag
+            p["vy"] *= drag
             p["age"] += DT
         self._particles = [p for p in self._particles
-                           if p["age"] <= PARTICLE_LIFE][-MAX_PARTICLES:]
+                           if p["age"] <= p["life"]][-MAX_PARTICLES:]
 
     def _emit_particles(self, state: State) -> None:
         if state.thrust <= 0.0:
@@ -397,7 +436,18 @@ class Renderer:
             self._particles.append({
                 "x": nozzle_x, "y": nozzle_y,
                 "vx": speed * math.cos(angle), "vy": speed * math.sin(angle),
-                "age": 0.0,
+                "age": 0.0, "kind": "smoke", "life": PARTICLE_LIFE,
+            })
+
+        # 부스러기: 훨씬 빠르고 넓게 튀며 금방 사라진다. 연기만 있으면
+        # 배기가 뭉근해 보여 추력의 격렬함이 전달되지 않는다.
+        for _ in range(max(1, n // 2)):
+            speed = self._rng.uniform(110.0, 190.0)
+            angle = base_angle + self._rng.uniform(-0.75, 0.75)
+            self._particles.append({
+                "x": nozzle_x, "y": nozzle_y,
+                "vx": speed * math.cos(angle), "vy": speed * math.sin(angle),
+                "age": 0.0, "kind": "debris", "life": DEBRIS_LIFE,
             })
 
     def _draw_particles(self) -> None:
@@ -406,10 +456,15 @@ class Renderer:
         overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
         _, _, scale = self._cam
         for p in self._particles:
-            frac = p["age"] / PARTICLE_LIFE
-            radius_px = max(1, int((2.0 + 14.0 * frac) * scale))
-            alpha = int(170 * (1.0 - frac) ** 1.5)
-            pygame.draw.circle(overlay, (*SMOKE_COLOR, alpha),
+            frac = p["age"] / p["life"]
+            if p["kind"] == "smoke":
+                radius_px = max(1, int((2.0 + 14.0 * frac) * scale))
+                color = (*SMOKE_COLOR, int(170 * (1.0 - frac) ** 1.5))
+            else:
+                # 부스러기는 커지지 않고 작게 유지되며 빠르게 흐려진다
+                radius_px = max(1, int(1.2 * scale))
+                color = (*DEBRIS_COLOR, int(240 * (1.0 - frac)))
+            pygame.draw.circle(overlay, color,
                                self._to_px(p["x"], p["y"]), radius_px)
         self.surface.blit(overlay, (0, 0))
 
