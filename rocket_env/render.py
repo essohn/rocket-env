@@ -89,6 +89,9 @@ JAW_TRUSS_BAY = 6.0
 # 로켓이 이만큼 위로 접근하면 집게가 오므라들기 시작한다. 잡히는 순간에만
 # 닫히면 동작이 보이지 않는다.
 GRIP_APPROACH_RANGE = 45.0
+# 접근 중에는 여기까지만 닫는다. 다 닫아버리면 포획 직후 마무리 연출이
+# 0부터 다시 램프해 젓가락이 한 번 벌어졌다 닫히는 것처럼 보인다.
+GRIP_APPROACH_MAX = 0.45
 GRIP_ALIGN_RANGE = 3.0    # 수평 정렬이 이 배수 안이어야 닫기 시작한다
 BODY_COLOR = (232, 234, 238)
 BODY_HALF_W = 4.2          # 원통 반지름 (m)
@@ -97,6 +100,10 @@ PIN_Y = ROCKET_HEIGHT / 2.0 - 2.0   # 기체 맨 위 (걸림쇠는 최상단에 
 PIN_OUT = 3.4              # 몸통 밖으로 튀어나온 길이
 PIN_THICK = 1.6
 PIN_COLOR = (176, 182, 194)
+# 포획 후 미끄러져 내려앉는 거리. 걸림쇠 높이(PIN_Y) 전체만큼 내리면
+# 기체가 팔 한참 아래로 매달려 "너무 밑에서 걸린" 것처럼 보인다.
+# 걸린 자리가 상단 가까이 남도록 짧게 잡는다.
+SETTLE_DROP = 9.0
 FIN_COLOR = (120, 125, 135)
 TRAIL_COLOR = (90, 160, 220)
 HUD_COLOR = (225, 230, 240)
@@ -225,7 +232,7 @@ class Renderer:
         # ease-out 지수를 3에서 2로 낮춰 초반 가속을 줄였다. 3제곱은 첫
         # 몇 프레임에 대부분을 내려와 버려서 "미끄러진다"기보다 튄다.
         eased = 1.0 - (1.0 - min(max(settle, 0.0), 1.0)) ** 2
-        return replace(state, y=state.y - PIN_Y * eased, thrust=0.0)
+        return replace(state, y=state.y - SETTLE_DROP * eased, thrust=0.0)
 
     # --- 카메라 ---
 
@@ -500,7 +507,8 @@ class Renderer:
         if abs(state.x - x_tower) > window_half * GRIP_ALIGN_RANGE:
             return 0.0
         above = state.y - y_arm
-        return min(max(1.0 - above / GRIP_APPROACH_RANGE, 0.0), 1.0)
+        raw = min(max(1.0 - above / GRIP_APPROACH_RANGE, 0.0), 1.0)
+        return raw * GRIP_APPROACH_MAX
 
     def _catch_geometry(self, target: tuple[float, float]):
         """타워 x, 팔 높이, 팔 반폭, 실제 포획 창 반폭을 돌려준다.

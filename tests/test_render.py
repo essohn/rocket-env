@@ -191,6 +191,8 @@ def test_jaws_close_as_the_rocket_approaches():
     y_arm = cfg["catch"]["y_arm"]
     target = (cfg["catch"]["x_tower"], y_arm)
 
+    from rocket_env.render import GRIP_APPROACH_MAX
+
     far = renderer._approach_grip(replace(a_state(cfg), x=0.0, y=y_arm + 200.0),
                                   target)
     near = renderer._approach_grip(replace(a_state(cfg), x=0.0, y=y_arm + 20.0),
@@ -198,8 +200,11 @@ def test_jaws_close_as_the_rocket_approaches():
     arrived = renderer._approach_grip(replace(a_state(cfg), x=0.0, y=y_arm),
                                       target)
     assert far == 0.0
-    assert 0.0 < near < 1.0
-    assert arrived == 1.0
+    assert 0.0 < near < arrived
+    # 접근만으로는 끝까지 닫히지 않는다 — 나머지는 포획 후 마무리 연출이
+    # 채운다. 여기서 1.0 이 되면 연출이 0부터 램프해 젓가락이 한 번
+    # 벌어졌다 닫히는 것처럼 보인다.
+    assert arrived == GRIP_APPROACH_MAX < 1.0
 
     # 수평으로 크게 빗나간 로켓에는 닫히지 않는다 — 어색하기 때문이다.
     off = renderer._approach_grip(

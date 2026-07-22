@@ -35,6 +35,7 @@ import numpy as np
 
 import rocket_env  # noqa: F401
 from rocket_env.config import PRESETS
+from rocket_env.render import GRIP_APPROACH_MAX
 
 EVAL_EPISODE_COUNT_DEFAULT = 20
 ARTIFACTS_DIR = Path(__file__).resolve().parent.parent / "artifacts"
@@ -42,7 +43,9 @@ ARTIFACTS_DIR = Path(__file__).resolve().parent.parent / "artifacts"
 # --- 마무리 연출 ---
 # 캐치 성공 영상은 팔에 매달린 순간 끝나버리면 "잡았다"는 느낌이 없다.
 # 마지막 상태 그대로 젓가락만 닫아가며 몇 프레임 더 그린다.
-GRIP_FRAMES = 14
+# 젓가락이 조여지는 구간. 14프레임(0.7초)은 순식간이라 고정되는 느낌이
+# 없었다. 34프레임이면 1.7초에 걸쳐 천천히 물린다.
+GRIP_FRAMES = 34
 # 걸림 구조가 팔에 얹힐 때까지 미끄러지는 구간. 12프레임(0.6초)은 너무
 # 빨라 미끄러지는 동작이 보이지 않았다. 34프레임이면 1.7초에 걸쳐 내려온다.
 SETTLE_FRAMES = 34      # grip 0 -> 1로 닫히는 구간
@@ -101,10 +104,14 @@ def closing_frames(env, outcome: str, is_success: bool) -> list[np.ndarray]:
 
     frames = []
     if is_catch:
-        # 1단계: 집게가 오므라든다.
+        # 1단계: 집게가 마저 조여진다. 접근 중 이미 GRIP_APPROACH_MAX 까지
+        # 닫혀 있으므로 0이 아니라 그 값에서 이어받는다 — 0부터 시작하면
+        # 젓가락이 한 번 벌어졌다 닫히는 것처럼 보인다.
         for i in range(GRIP_FRAMES):
+            t = i / (GRIP_FRAMES - 1)
+            grip = GRIP_APPROACH_MAX + (1.0 - GRIP_APPROACH_MAX) * t
             frames.append(renderer.draw(state, target, outcome,
-                                        grip=i / (GRIP_FRAMES - 1), settle=0.0))
+                                        grip=grip, settle=0.0))
         # 2단계: 기체가 미끄러져 내려가 걸림 구조가 팔에 얹힌다.
         for i in range(SETTLE_FRAMES):
             frames.append(renderer.draw(state, target, outcome, grip=1.0,
