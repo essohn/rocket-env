@@ -4516,6 +4516,141 @@ def test_caught_rocket_is_drawn_hanging_below_the_arm():
 
 ---
 
+### Task 23: 연출 강화 — 구름, 젓가락 개폐, 타워 측면 배치
+
+**배경.** 캐치 영상을 보니 세 가지가 아쉽다.
+
+1. **하강 속도감이 없다.** 배경이 단색 그라디언트라 34 m/s 로 떨어지든
+   2 m/s 로 기어가든 화면상 차이가 거의 없다.
+2. **젓가락이 정적이다.** 포획 순간 팔 색만 바뀌고 끝난다. 이 프로젝트의
+   간판 장면인데 "잡았다"는 동작이 없다.
+3. **타워가 포획 지점 정중앙에 있다.** 마스트를 `x_tower` 에 그리므로
+   로켓이 **타워 위에 내려앉는 것처럼** 보인다. 실제 Mechazilla 는 타워가
+   옆에 서 있고 팔이 옆으로 뻗어 부스터를 붙잡는다.
+
+**Files:** `rocket_env/render.py`, `scripts/record_demo.py`, `tests/test_render.py`
+
+- [ ] **Step 1: 구름 배치**
+
+`Renderer.__init__` 에서 고정 시드로 한 번 생성해 재사용한다.
+
+```python
+CLOUD_COUNT = 18
+CLOUD_COLOR = (238, 242, 250)
+CLOUD_SEED = 20260722
+
+
+def _build_clouds(self) -> list[dict]:
+    """월드 좌표에 고정된 구름. 카메라가 내려가면 스쳐 지나가며
+    하강 속도를 눈으로 알 수 있게 한다."""
+    rng = np.random.default_rng(CLOUD_SEED)
+    clouds = []
+    for _ in range(CLOUD_COUNT):
+        r = float(rng.uniform(14.0, 40.0))
+        clouds.append({
+            "x": float(rng.uniform(WORLD_X_MIN - 120.0, WORLD_X_MAX + 120.0)),
+            "y": float(rng.uniform(70.0, 540.0)),
+            "r": r,
+            "alpha": int(rng.integers(70, 130)),
+            # 뭉게구름처럼 보이도록 원을 몇 개 겹친다
+            "puffs": [(float(rng.uniform(-1.3, 1.3)) * r,
+                       float(rng.uniform(-0.35, 0.35)) * r,
+                       float(rng.uniform(0.55, 1.0)) * r) for _ in range(5)],
+        })
+    return clouds
+```
+
+하늘 다음, 지면·타워·연기보다 **먼저** 그린다. 알파 서피스 한 장에 모아
+그린 뒤 한 번에 blit 한다. 화면 밖 구름은 건너뛴다.
+
+- [ ] **Step 2: 타워를 옆으로 옮긴다**
+
+마스트를 포획 지점에서 왼쪽으로 물리고, 팔이 옆으로 뻗어 나오게 한다.
+**물리 목표는 그대로 `x_tower` 다 — 그림만 바뀐다.**
+
+```python
+TOWER_OFFSET = 55.0     # 마스트가 포획 지점에서 왼쪽으로 물러난 거리 (m)
+TOWER_HEIGHT_FACTOR = 1.6
+```
+
+구조:
+- 마스트: `x_tower - TOWER_OFFSET` 에서 지면부터 `y_arm * 1.6` 까지 수직선
+- 가로보(cantilever): `y_arm` 높이에서 마스트부터 `x_tower + arm_half` 까지
+- 마스트에 가로 살대 3~4개를 그려 격자 구조물처럼 보이게 한다
+
+- [ ] **Step 3: 젓가락 개폐**
+
+`draw()` 에 `grip: float = 0.0` 인자를 추가한다. 0이면 벌어진 상태,
+1이면 로켓을 문 상태.
+
+```python
+JAW_COLOR = (255, 175, 60)
+JAW_CLOSED_HALF = 5.0     # 다 물었을 때 턱 안쪽 간격 (m)
+
+
+def _draw_jaws(self, x_tower, y_arm, window_half, grip):
+    """포획 창 자리에 달린 두 턱. grip 0 -> 1 로 안쪽으로 닫힌다."""
+    inner = window_half + (JAW_CLOSED_HALF - window_half) * grip
+    for sign in (-1, 1):
+        tip = self._to_px(x_tower + sign * inner, y_arm)
+        root = self._to_px(x_tower + sign * (window_half + 12.0), y_arm)
+        pygame.draw.line(self.surface, JAW_COLOR, root, tip,
+                         max(3, int(9 * self._cam[2] / MIN_SCALE ** 0)))
+```
+
+두께는 카메라 배율에 맞춰 조정한다(줌인 시 굵게). 턱은 가로보 **위에**
+그려 구조물에 달린 것처럼 보이게 한다.
+
+`env.render()` 는 캐치 성공 상태면 `grip=1.0` 을 넘겨, 대화형으로 써도
+닫힌 모습이 보이게 한다.
+
+- [ ] **Step 4: 녹화기가 포획 연출 프레임을 덧붙인다**
+
+`scripts/record_demo.py` 에서, 선택된 에피소드가 **캐치 성공**이면 마지막
+상태로 추가 프레임을 만든다.
+
+```python
+GRIP_FRAMES = 14      # 0 -> 1 로 닫히는 구간
+HOLD_FRAMES = 24      # 다 물고 정지해 있는 구간 (약 1.2초)
+```
+
+닫히는 동안 `grip = i / (GRIP_FRAMES - 1)`, 그 뒤 `grip = 1.0` 으로 유지한다.
+로켓은 `_catch_draw_state` 가 이미 팔에 매단 위치·자세 0·추력 0 으로
+그리므로 **완전히 정지**해 보인다.
+
+착륙 성공에도 `HOLD_FRAMES` 만큼 정지 프레임을 붙여 끝이 급하지 않게 한다.
+
+- [ ] **Step 5: 테스트**
+
+```python
+def test_clouds_are_deterministic_across_renderers():
+    """같은 시드로 만든 구름은 렌더러를 새로 만들어도 같다."""
+
+
+def test_jaws_close_as_grip_increases():
+    """grip 이 커질수록 턱 안쪽 간격이 좁아진다."""
+
+
+def test_tower_mast_is_drawn_beside_the_capture_point():
+    """마스트 x 좌표가 x_tower 보다 왼쪽이다 — 로켓이 타워 위가 아니라
+    옆에 잡힌다."""
+
+
+def test_render_accepts_grip_argument():
+    """grip 을 넘겨도 프레임 형태가 변하지 않는다."""
+```
+
+- [ ] **Step 6: 육안 확인**
+
+`catch-seed0.zip` 와 `landing-basic-seed0.zip` 이 이미 있으므로 학습 없이
+바로 녹화된다. 두 영상을 뽑아 **직접 보고** 확인한다.
+
+- 구름이 스쳐 지나가며 하강 속도가 느껴지는가 (34 m/s 구간과 2 m/s 구간의 차이)
+- 타워가 옆에 서 있고 로켓이 그 **옆**에 잡히는가
+- 젓가락이 눈에 띄게 오므려지고, 다 물면 로켓이 정지하는가
+
+---
+
 ## 완료 기준
 
 - [ ] `SDL_VIDEODRIVER=dummy uv run pytest -v` 전부 통과
