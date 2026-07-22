@@ -31,8 +31,8 @@ def test_partial_nested_override_keeps_sibling_defaults():
 
 def test_catch_task_swaps_in_catch_profile():
     cfg = build_config({"task": "catch"})
-    assert cfg["success"]["v_max"] == 5.0
-    assert cfg["success"]["zone_r"] == 6.0
+    assert cfg["success"]["v_max"] == 8.0
+    assert cfg["success"]["zone_r"] == 15.0
     assert cfg["reward"]["w_speed"] == 60.0
     assert cfg["reward"]["v_ref"] == 2.0
 
@@ -115,7 +115,7 @@ def test_unknown_nested_key_raises_config_error():
     ("landing-wind", ("wind", "max_speed"), 8.0),
     ("landing-gust", ("wind", "ou_sigma"), 3.0),
     ("landing-gust", ("fuel", "capacity"), 55.0),
-    ("catch", ("success", "zone_r"), 6.0),
+    ("catch", ("success", "zone_r"), 15.0),
     ("catch", ("reward", "w_speed"), 60.0),
     ("catch", ("fuel", "capacity"), 60.0),
 ])

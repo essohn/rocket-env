@@ -467,8 +467,12 @@ closeness(value, threshold) = clip(1 - value / (2·threshold), 0, 1)
 (사용자가 명시한 키는 덮어쓰지 않는다). 캐치 프로파일의 `success` 기본값:
 
 ```python
-"success": {"v_max": 5.0, "theta_max_deg": 5.0, "omega_max_deg": 5.0, "zone_r": 6.0}
+"success": {"v_max": 8.0, "theta_max_deg": 8.0, "omega_max_deg": 8.0, "zone_r": 15.0}
 ```
+
+(2026-07-22 수정: 원래 값(5.0/5.0/5.0/6.0)은 landing 대비 네 축을 동시에
+조여 절벽을 만들었다. 1M 스텝·3시드 측정에서 성공률이 전부 0.0%였고,
+`docs/baselines.md`에 그 측정치를 남긴 뒤 landing과 중간값으로 완화했다.)
 
 ### 잠금 정책
 
@@ -511,7 +515,7 @@ closeness(value, threshold) = clip(1 - value / (2·threshold), 0, 1)
 | `landing-descent` | landing | none | ∞ | 300 | -30 | ±80 | ±30° | 50 |
 | `landing-wind` | landing | constant 8 m/s | ∞ | 300 | -30 | ±80 | ±30° | 50 |
 | `landing-gust` | landing | gust (σ=3, ±12) | 55 | 300 | -30 | ±100 | ±30° | 50 |
-| `catch` | catch | constant 5 m/s | 60 | 300 | -30 | ±80 | ±30° | 6 |
+| `catch` | catch | constant 5 m/s | 60 | 300 | -30 | ±80 | ±30° | 15 |
 
 축 진행: `landing-basic`이 자세 보정 없이(±5°는 성공 임계 ±10° 안쪽) 감속만
 가르치고, `landing-attitude`가 자세 보정을 추가하고(±30°), `landing-descent`가
