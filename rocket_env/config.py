@@ -100,6 +100,10 @@ PRESETS: dict[str, dict[str, Any]] = {
     # landing 다섯 라운드는 난이도 축을 하나씩만 추가한다. 여러 축을
     # 동시에 올리면 학생은 무엇이 새로 어려워졌는지 모르고, 조교는 어디서
     # 막히는지 진단할 수 없다. catch는 이 규칙 밖이다 — 아래 주석 참고.
+    #
+    # x_range(수평 퍼짐)는 난이도 축이 아니라 고정된 환경 속성이라 여섯
+    # 프리셋 전부 동일하게 둔다 — 라운드가 올라갈수록 난이도만 오른다는
+    # 사다리의 전제를 지키기 위해서다.
     "landing-basic": {
         "task": "landing",
         "wind": {"mode": "none", "max_speed": 0.0},
@@ -114,23 +118,25 @@ PRESETS: dict[str, dict[str, Any]] = {
         "wind": {"mode": "none", "max_speed": 0.0},
         "fuel": {"capacity": None},
         "init": {"y": 200.0, "vy_range": [-20.0, -20.0],
-                 "x_range": [-50.0, 50.0], "theta_range_deg": [-30.0, 30.0]},
+                 "x_range": [-80.0, 80.0], "theta_range_deg": [-30.0, 30.0]},
     },
-    # + 고속 진입: 고도와 초기 하강속도가 올라간다.
+    # + 고도 상승: 낙하 시작 고도가 올라가 제동을 언제 시작할지 판단할
+    # 시간축이 길어진다. 항력 시상수가 약 5초라 이 고도에서는 종단속도에
+    # 수렴하므로, 초기 하강속도는 실질적 난이도에 영향을 주지 않아 고정한다.
     "landing-descent": {
         "task": "landing",
         "wind": {"mode": "none", "max_speed": 0.0},
         "fuel": {"capacity": None},
-        "init": {"y": 450.0, "vy_range": [-50.0, -40.0],
-                 "x_range": [-50.0, 50.0], "theta_range_deg": [-30.0, 30.0]},
+        "init": {"y": 300.0, "vy_range": [-30.0, -30.0],
+                 "x_range": [-80.0, 80.0], "theta_range_deg": [-30.0, 30.0]},
     },
     # + 외란: 에피소드 내내 일정한 옆바람.
     "landing-wind": {
         "task": "landing",
         "wind": {"mode": "constant", "max_speed": 8.0},
         "fuel": {"capacity": None},
-        "init": {"y": 450.0, "vy_range": [-50.0, -40.0],
-                 "x_range": [-50.0, 50.0], "theta_range_deg": [-30.0, 30.0]},
+        "init": {"y": 300.0, "vy_range": [-30.0, -30.0],
+                 "x_range": [-80.0, 80.0], "theta_range_deg": [-30.0, 30.0]},
     },
     # + 불확실성과 자원: 돌풍이 되고 연료가 유한해진다. 이 라운드만 축이
     #   둘인데, 둘 다 "예측할 수 없는 조건에서 버티기"라는 한 주제다.
@@ -142,8 +148,8 @@ PRESETS: dict[str, dict[str, Any]] = {
         # 120 이면 어떤 정책도 연료가 바닥날 수 없어 "유한 연료" 축이
         # 이름뿐이었다. 55는 그 상한보다 낮아 소모 관리가 실제로 필요하다.
         "fuel": {"capacity": 55.0},
-        "init": {"y": 450.0, "vy_range": [-50.0, -40.0],
-                 "x_range": [-50.0, 50.0], "theta_range_deg": [-30.0, 30.0]},
+        "init": {"y": 300.0, "vy_range": [-30.0, -30.0],
+                 "x_range": [-80.0, 80.0], "theta_range_deg": [-30.0, 30.0]},
     },
     # + 정밀 포획: 지면 대신 발사탑 팔 높이를 통과해야 한다. 다른 다섯
     # 라운드와 달리 이 라운드는 축을 하나만 얹는 게 아니라 아예 다른
@@ -154,8 +160,8 @@ PRESETS: dict[str, dict[str, Any]] = {
         "wind": {"mode": "constant", "max_speed": 5.0},
         # 60은 fuel_cost(2g) * max_steps = 80 보다 낮아 소모 관리가 필요하다.
         "fuel": {"capacity": 60.0},
-        "init": {"y": 450.0, "vy_range": [-50.0, -40.0],
-                 "x_range": [-50.0, 50.0], "theta_range_deg": [-30.0, 30.0]},
+        "init": {"y": 300.0, "vy_range": [-30.0, -30.0],
+                 "x_range": [-80.0, 80.0], "theta_range_deg": [-30.0, 30.0]},
     },
 }
 
