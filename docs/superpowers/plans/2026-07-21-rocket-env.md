@@ -4200,6 +4200,143 @@ SDL_VIDEODRIVER=dummy uv run pytest -v
 
 ---
 
+### Task 17: shaping 을 점수에서 분리 — 학습 신호는 키우고 점수는 불변으로
+
+**배경.** 최종 리뷰의 I1: shaping 총합의 상한 `-Φ(s₀)` 가 0.98~2.25 인데 종료
+보상은 0 / ≤40 / ≥132 다. **shaping 이 리턴의 1% 미만**이라 탐색을 전혀
+안내하지 못한다. 다섯 시드 중 셋이 0% 인 이봉형 분포의 진짜 원인이며,
+"희소 보상 도메인의 본질"이 아니라 **조정 가능한 스케일 선택**이다.
+
+가중치를 그냥 올리면 맴돌기가 되살아난다 — 타임아웃 점수가
+`0 + (Φ(s_T) - Φ(s₀))` 라 가중치를 20배 하면 호버가 20점을 받는다.
+
+**해법: shaping 총합을 정확히 0으로 만든다.**
+
+1. 종료 스텝에서 `Φ(종료) := 0` 으로 두면 망원경 합이 `-Φ(s₀)` 가 된다.
+2. 종료 시 `+Φ(s₀)` 를 더하면 총합이 **정확히 0** 이다.
+
+그러면 shaping 은 **어떤 정책에서도, 어떤 가중치에서도 점수에 기여하지
+않는다.** 리더보드 점수는 순수하게 종료 보상과 연료 비용이 되고, 학습에는
+밀집 신호가 그대로 남는다. 가중치를 마음껏 올려도 **증명 가능하게 exploit
+불가**다.
+
+**Files:** `rocket_env/env.py`, `rocket_env/config.py`,
+`tests/test_env.py`, `tests/test_exploit_regression.py`, `docs/`
+
+- [ ] **Step 1: 실패하는 테스트 작성**
+
+`tests/test_exploit_regression.py` 에 추가한다. 이 테스트가 이 태스크의
+핵심 산출물이다 — 성질을 직접 단언한다.
+
+```python
+def test_return_is_independent_of_shaping_weights():
+    """shaping 가중치를 바꿔도 에피소드 점수가 변하지 않는다.
+
+    종료 상태의 Φ 를 0으로 두고 종료 시 Φ(s₀) 를 되돌려주므로 망원경 합이
+    정확히 0이다. 따라서 학생이 학습용 shaping 을 아무리 세게 키워도 평가
+    점수는 영향받지 않는다 — 이것이 shaping 을 증명 가능하게 exploit
+    불가로 만든다. 예전에는 가중치를 올리면 맴돌기가 되살아났다.
+    """
+    loud = {"shaping_w_dist": 500.0, "shaping_w_attitude": 500.0,
+            "shaping_w_speed": 500.0}
+    for preset in ("landing-basic", "catch"):
+        for action in (NOOP, HOVER, FULL_UP):
+            base, _ = rollout(PRESETS[preset], action, 0)
+            amped, _ = rollout({**PRESETS[preset], "reward": loud}, action, 0)
+            assert base == pytest.approx(amped, abs=1e-6), (
+                f"{preset} action={action}: {base} vs {amped}")
+```
+
+- [ ] **Step 2: 테스트 실패 확인**
+
+- [ ] **Step 3: `rocket_env/env.py` 수정**
+
+`reset()` 에서 초기 잠재값을 따로 보관한다.
+
+```python
+        self._potential = potential(self.state, self._target, self.cfg)
+        # 종료 시 되돌려주어 shaping 총합을 정확히 0으로 만든다.
+        self._initial_potential = self._potential
+```
+
+`step()` 에서 종료 스텝의 잠재값을 0으로 두고, 종료 시 보상한다.
+
+```python
+        # 종료 상태의 Φ 는 0으로 둔다. 그러면 망원경 합이 -Φ(s₀) 가 되고,
+        # 아래에서 Φ(s₀) 를 되돌려주면 총합이 정확히 0이 된다. shaping 은
+        # 학습 신호로만 작동하고 점수에는 기여하지 않는다.
+        cur_potential = (0.0 if outcome is not None
+                         else potential(cur, self._target, self.cfg))
+        reward = (shaping(self._potential, cur_potential, self.cfg)
+                  - self.cfg["reward"]["fuel_penalty"] * used)
+        self._potential = cur_potential
+```
+
+종료 처리에서 보상 항을 더한다.
+
+```python
+        if outcome is not None:
+            self._outcome = outcome
+            reward += self._initial_potential
+            reward += terminal_reward(outcome, cur, self._target, self.cfg,
+                                      self._fuel_frac())
+```
+
+`__init__` 에도 `self._initial_potential = 0.0` 을 초기화한다.
+
+- [ ] **Step 4: shaping 가중치 상향**
+
+`DEFAULT_CONFIG["reward"]` 에서 20배로 올린다. 총합이 0이라 점수에 영향이
+없고, 스텝당 신호만 커진다.
+
+```python
+        # 총합이 정확히 0이므로 점수에는 영향이 없다. 값이 클수록 스텝당
+        # 학습 신호가 강해진다. 예전 값(1.0/0.5/0.5)에서는 shaping 이
+        # 리턴의 1% 미만이라 탐색을 전혀 안내하지 못했다.
+        "shaping_w_dist": 20.0,
+        "shaping_w_attitude": 10.0,
+        "shaping_w_speed": 10.0,
+```
+
+- [ ] **Step 5: `SHAPING_BOUND` 를 연료 비용 상한으로 교체**
+
+`tests/test_exploit_regression.py` 에서 `SHAPING_BOUND` 를 없애고 다음으로
+바꾼다. shaping 이 0이므로 정책 간 점수 차의 여유는 이제 연료 비용뿐이다.
+
+```python
+# 정책 간 점수 차이에 허용할 여유. shaping 총합이 정확히 0이므로 남는
+# 변동 요인은 연료 비용뿐이다: fuel_penalty(0.05) x 최대 소모(80) = 4.0.
+FUEL_COST_BOUND = 5.0
+```
+
+기존 `+ SHAPING_BOUND` 를 전부 `+ FUEL_COST_BOUND` 로 바꾸고,
+`test_shaping_bound_covers_every_preset_initial_state` 는 삭제한다 —
+`-Φ(s₀)` 가 더 이상 점수 상한을 정하지 않으므로 검증할 대상이 없다.
+Step 1 의 새 테스트가 그 자리를 대신한다.
+
+- [ ] **Step 6: 전체 테스트**
+
+```bash
+SDL_VIDEODRIVER=dummy uv run pytest -v
+```
+
+**개루프 회귀 테스트가 여전히 6개 프리셋 전부에서 0% 인지 반드시 확인한다.**
+깨지면 상수를 만지지 말고 보고한다.
+
+- [ ] **Step 7: 커밋**
+
+- [ ] **Step 8: 재측정**
+
+```bash
+uv run python scripts/measure_baseline.py --preset landing-basic --steps 1000000 --seeds 5
+```
+
+**이 태스크의 진짜 검증이다.** shaping 이 강해져 이봉형 분포가 완화되면
+(성공 시드 비율 증가, 분산 감소) 다회 제출 완화책의 필요성 자체가 줄어든다.
+숫자를 그대로 보고하고 `docs/baselines.md` 에 기록한다.
+
+---
+
 ## 완료 기준
 
 - [ ] `SDL_VIDEODRIVER=dummy uv run pytest -v` 전부 통과
