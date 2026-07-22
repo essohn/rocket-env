@@ -81,21 +81,29 @@ def test_info_contains_every_contract_key():
 
 
 def test_same_seed_reproduces_identical_trajectories():
-    """같은 시드는 같은 궤적을, 다른 시드는 다른 궤적을 만든다.
+    """같은 시드는 bit-exact 동일 궤적을, 다른 시드는 다른 궤적을 만든다.
 
-    Task 17 이후 shaping 총합이 정확히 0으로 상쇄되고, landing-gust의 NOOP
-    낙하는 항상 impact_speed가 v_max의 2배를 넘어 실패 점수도 0으로
-    포화된다. 그래서 에피소드 점수(total)는 더 이상 시드 차이를 드러내는
-    신호가 아니다 — 두 시드 모두 total=0.0 이 나오지만 궤적 자체는 다르다.
-    대신 시드에 직접 의존하는 wind_x로 궤적이 실제로 갈라지는지 확인한다.
+    채점 워커가 reset(seed=base + i) 로 에피소드를 재현하므로, 이 성질이
+    깨지면 같은 모델이 실행할 때마다 다른 점수를 받는다.
+
+    에피소드 점수는 대리 지표로 쓸 수 없다 — shaping 이 정확히 상쇄되고
+    실패 근접도가 포화되면 궤적이 달라도 점수가 같아진다. 관찰 시퀀스
+    전체를 비교한다.
     """
-    env = RocketEnv(config=PRESETS["landing-gust"])
-    a, info_a = rollout(env, NOOP, seed=123)
-    b, info_b = rollout(env, NOOP, seed=123)
-    _, info_c = rollout(env, NOOP, seed=124)
-    assert a == b
-    assert info_a["wind_x"] == info_b["wind_x"]
-    assert info_a["wind_x"] != info_c["wind_x"]
+    def trajectory(seed: int) -> np.ndarray:
+        env = RocketEnv(config=PRESETS["landing-gust"])
+        obs, _ = env.reset(seed=seed)
+        frames = [obs]
+        while True:
+            obs, _, terminated, truncated, _ = env.step(NOOP)
+            frames.append(obs)
+            if terminated or truncated:
+                env.close()
+                return np.stack(frames)
+
+    a, b, c = trajectory(123), trajectory(123), trajectory(124)
+    assert np.array_equal(a, b)
+    assert not (a.shape == c.shape and np.array_equal(a, c))
 
 
 def test_config_seed_is_not_consumed_by_the_env():
