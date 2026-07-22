@@ -498,16 +498,19 @@ closeness(value, threshold) = clip(1 - value / (2·threshold), 0, 1)
 추가한다 — 두 라운드 사이에서 여러 축이 동시에 바뀌면 학생은 무엇이 새로
 어려워졌는지 모르고, 조교는 어디서 막히는지 진단할 수 없다. 착륙 라운드는
 모두 `success` 임계값(zone_r 포함)을 공유한다 — 난이도는 초기 조건과 외란에서만
-온다. `x_range`(수평 퍼짐)는 난이도 축이 아니라 고정된 환경 속성이라 여섯
-프리셋 모두 ±80으로 동일하다.
+온다. `x_range`(수평 퍼짐) 그 자체도 난이도 축이다 — 착륙장 반경이 50m이므로
+±50을 넘으면 대부분의 에피소드가 옆이동을 필요로 하고, 옆이동은 기울임을
+요구해 자세 축과 곱셈적으로 상호작용한다. 그래서 라운드가 올라갈수록 단조
+비감소하도록 두었다. `landing-basic`과 `landing-attitude`는 일부러 ±50을
+공유해 2라운드가 자세 축만 분리해서 시험하도록 한다.
 
 | 프리셋 | task | wind | fuel | y₀ | vy₀ | x_range | init θ | zone_r |
 |--------|------|------|------|----|----|---------|--------|--------|
-| `landing-basic` | landing | none | ∞ | 200 | -20 | ±80 | ±5° | 50 |
-| `landing-attitude` | landing | none | ∞ | 200 | -20 | ±80 | ±30° | 50 |
+| `landing-basic` | landing | none | ∞ | 200 | -20 | ±50 | ±5° | 50 |
+| `landing-attitude` | landing | none | ∞ | 200 | -20 | ±50 | ±30° | 50 |
 | `landing-descent` | landing | none | ∞ | 300 | -30 | ±80 | ±30° | 50 |
 | `landing-wind` | landing | constant 8 m/s | ∞ | 300 | -30 | ±80 | ±30° | 50 |
-| `landing-gust` | landing | gust (σ=3, ±12) | 55 | 300 | -30 | ±80 | ±30° | 50 |
+| `landing-gust` | landing | gust (σ=3, ±12) | 55 | 300 | -30 | ±100 | ±30° | 50 |
 | `catch` | catch | constant 5 m/s | 60 | 300 | -30 | ±80 | ±30° | 6 |
 
 축 진행: `landing-basic`이 자세 보정 없이(±5°는 성공 임계 ±10° 안쪽) 감속만
