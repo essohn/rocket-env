@@ -1,0 +1,180 @@
+"""학습된 에이전트의 데모 영상을 만든다.
+
+`measure_baseline.py`는 학습 → 평가 → 폐기라, 실제로 에이전트가 무엇을
+배웠는지 눈으로 볼 방법이 없었다. 강의 자료로 쓸 영상도, 학생이 자기
+에이전트를 디버깅할 때 참고할 영상도 이 스크립트가 만든다.
+
+동작:
+    1. `--model`(기본값은 프리셋·시드에서 유도)에 저장된 모델이 있으면
+       로드하고, 없으면 `measure_baseline.py`와 동일한 하이퍼파라미터로
+       새로 학습해 그 경로에 저장한다 — 다음 실행부터는 학습을 건너뛴다.
+    2. `--episodes`개 에피소드를 `measure_baseline.py`와 같은 프로토콜
+       (시드 10000+i, deterministic=True)로 평가하면서 매 프레임을 모은다.
+    3. 가장 좋은 에피소드 — 성공 우선, 동점이면 점수 — 를 골라 영상으로
+       쓴다(전부 실패면 점수가 가장 높은 실패를 대신 고른다).
+    4. 골라진 에피소드로 mp4와, 그걸 축소 재인코딩한 gif를 각각 쓴다.
+
+인코딩은 새 의존성을 늘리지 않으려고 PATH의 ffmpeg에 프레임을
+stdin으로 그대로 흘려보낸다. `subprocess`/`ffmpeg`/`stable_baselines3`는
+전부 이 스크립트 안에서만 쓰이며, 패키지의 런타임 의존성
+(gymnasium/numpy/pygame)은 늘어나지 않는다.
+
+사용:
+    uv run python scripts/record_demo.py --preset landing-basic --steps 1000000 --seed 0
+"""
+
+import argparse
+import os
+import subprocess
+from pathlib import Path
+
+import gymnasium as gym
+import numpy as np
+
+import rocket_env  # noqa: F401
+from rocket_env.config import PRESETS
+
+EVAL_EPISODE_COUNT_DEFAULT = 20
+ARTIFACTS_DIR = Path(__file__).resolve().parent.parent / "artifacts"
+
+
+def default_model_path(preset: str, seed: int) -> Path:
+    return ARTIFACTS_DIR / f"{preset}-seed{seed}.zip"
+
+
+def train_or_load(env, model_path: Path, *, steps: int, lr: float, seed: int):
+    """모델이 있으면 로드, 없으면 학습 후 저장한다.
+
+    `measure_baseline.py`와 정확히 같은 하이퍼파라미터를 써야 이 스크립트가
+    만든 영상의 성공률이 `docs/baselines.md` 숫자와 비교 가능하다.
+    """
+    from stable_baselines3 import DQN
+
+    if model_path.exists():
+        print(f"기존 모델 로드: {model_path}")
+        return DQN.load(model_path, env=env, device="cpu")
+
+    print(f"모델이 없어 새로 학습한다 ({steps:,} 스텝, seed={seed}) ...")
+    model = DQN("MlpPolicy", env, verbose=0, device="cpu",
+                learning_rate=lr, buffer_size=200_000,
+                learning_starts=5_000, policy_kwargs={"net_arch": [256, 256]},
+                seed=seed)
+    model.learn(total_timesteps=steps)
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    model.save(model_path)
+    print(f"모델 저장: {model_path}")
+    return model
+
+
+def run_episode(env, model, seed: int) -> dict:
+    """한 에피소드를 끝까지 돌리며 프레임을 모은다."""
+    obs, _ = env.reset(seed=seed)
+    frames = [env.render()]
+    done = truncated = False
+    score = 0.0
+    info: dict = {}
+    while not (done or truncated):
+        action, _ = model.predict(obs, deterministic=True)
+        obs, reward, done, truncated, info = env.step(action)
+        score += float(reward)
+        frames.append(env.render())
+    return {
+        "seed": seed,
+        "frames": frames,
+        "score": score,
+        "is_success": bool(info["is_success"]),
+        "outcome": info["outcome"],
+        "impact_speed": info["impact_speed"],
+    }
+
+
+def pick_best(episodes: list[dict]) -> dict:
+    """성공 여부를 우선, 동점이면 점수로 최고 에피소드를 고른다."""
+    return max(episodes, key=lambda ep: (ep["is_success"], ep["score"]))
+
+
+def frames_to_mp4(frames: list[np.ndarray], fps: int, out_path: Path) -> None:
+    """원본 프레임을 ffmpeg 표준입력으로 흘려보내 mp4로 인코딩한다."""
+    height, width, _ = frames[0].shape
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "rawvideo", "-pix_fmt", "rgb24",
+        "-s", f"{width}x{height}", "-r", str(fps),
+        "-i", "-",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        str(out_path),
+    ]
+    proc = subprocess.run(
+        cmd, input=b"".join(f.astype(np.uint8).tobytes() for f in frames),
+        capture_output=True)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg 인코딩 실패 (mp4): {proc.stderr.decode(errors='replace')}")
+
+
+def mp4_to_gif(mp4_path: Path, gif_path: Path, *, fps: int, width: int = 320) -> None:
+    """mp4를 재인코딩해 폭을 줄인 gif를 만든다."""
+    filt = f"fps={fps},scale={width}:-1:flags=lanczos"
+    cmd = ["ffmpeg", "-y", "-i", str(mp4_path), "-vf", filt, str(gif_path)]
+    proc = subprocess.run(cmd, capture_output=True)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg 인코딩 실패 (gif): {proc.stderr.decode(errors='replace')}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--preset", default="landing-basic", choices=list(PRESETS))
+    parser.add_argument("--steps", type=int, default=1_000_000)
+    parser.add_argument("--lr", type=float, default=6e-4)
+    parser.add_argument("--seed", type=int, default=0, help="학습 시드")
+    parser.add_argument("--episodes", type=int, default=EVAL_EPISODE_COUNT_DEFAULT)
+    parser.add_argument("--model", type=Path, default=None,
+                         help="모델 경로. 기본값은 프리셋·시드에서 유도")
+    args = parser.parse_args()
+
+    os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+
+    model_path = args.model or default_model_path(args.preset, args.seed)
+
+    env = gym.make("rocket-v0", config=PRESETS[args.preset],
+                   render_mode="rgb_array")
+    fps = env.metadata["render_fps"]
+
+    model = train_or_load(env, model_path, steps=args.steps, lr=args.lr,
+                           seed=args.seed)
+
+    print(f"{args.episodes}개 에피소드 평가 중 (deterministic=True) ...")
+    episodes = []
+    successes = 0
+    for i in range(args.episodes):
+        ep = run_episode(env, model, seed=10_000 + i)
+        episodes.append(ep)
+        successes += int(ep["is_success"])
+        print(f"  episode {i:2d}  outcome={ep['outcome']:<12}  "
+              f"score={ep['score']:8.2f}  frames={len(ep['frames'])}")
+    env.close()
+
+    success_rate = successes / len(episodes)
+    print(f"성공률: {successes}/{len(episodes)} ({success_rate:.1%})")
+
+    best = pick_best(episodes)
+    impact = best["impact_speed"]
+    impact_str = f"{impact:.2f} m/s" if impact is not None else "n/a"
+    print(f"선택된 에피소드: seed={best['seed']}  outcome={best['outcome']}  "
+          f"score={best['score']:.2f}  impact_speed={impact_str}")
+    if not best["is_success"]:
+        print("경고: 20개 에피소드 중 성공이 하나도 없어 "
+              "가장 점수가 높은 실패 에피소드를 대신 기록한다.")
+
+    mp4_path = ARTIFACTS_DIR / f"{args.preset}-best.mp4"
+    gif_path = ARTIFACTS_DIR / f"{args.preset}-best.gif"
+    frames_to_mp4(best["frames"], fps, mp4_path)
+    mp4_to_gif(mp4_path, gif_path, fps=fps)
+    print(f"mp4: {mp4_path}")
+    print(f"gif: {gif_path}")
+
+
+if __name__ == "__main__":
+    main()
