@@ -267,31 +267,32 @@ def test_clouds_are_deterministic_across_renderers():
 
 
 def test_jaws_close_as_grip_increases():
-    """grip 이 커질수록 화면에 그려지는 턱의 안쪽 간격이 좁아진다.
+    """grip 이 커질수록 젓가락 팁의 벌어짐이 줄어든다.
 
-    내부 공식을 재계산하지 않고, 실제로 그려진 JAW_COLOR 픽셀을 스캔해
-    두 턱의 가장 안쪽(중앙에 가장 가까운) 픽셀 사이 거리를 잰다 — 그래야
-    `_draw_jaws`가 실제로 무엇을 그리는지 검증한 것이 된다.
+    젓가락은 마스트의 피봇에서 회전한다 — 팁만 위아래로 갈라졌다 모이고
+    피봇은 제자리다. 그래서 재야 할 것은 수평 간격이 아니라 **수직**
+    벌어짐이다. 내부 공식을 재계산하지 않고 실제로 그려진 JAW_COLOR
+    픽셀의 수직 퍼짐을 잰다 — 그래야 무엇이 그려지는지 검증한 것이 된다.
     """
     from rocket_env.render import JAW_COLOR
 
     cfg = build_config(PRESETS["catch"])
     renderer = Renderer(cfg, "rgb_array")
     target = (cfg["catch"]["x_tower"], cfg["catch"]["y_arm"])
-    # 로켓을 팔에서 충분히 떨어뜨려 두어 몸통이 턱 픽셀을 가리지 않게 한다.
+    # 로켓을 팔에서 충분히 떨어뜨려 몸통이 턱 픽셀을 가리지 않게 한다.
     state = replace(a_state(cfg), x=target[0], y=target[1] + 80.0, theta=0.0)
 
-    def inner_gap_px(grip: float) -> int:
+    def vertical_spread_px(grip: float) -> int:
         frame = renderer.draw(state, target, Outcome.IN_PROGRESS, grip=grip)
-        ys, xs = np.where(np.all(frame == JAW_COLOR, axis=-1))
-        assert xs.size > 0, "턱이 화면에 그려지지 않았다"
-        cx = renderer._to_px(*target)[0]
-        left_xs, right_xs = xs[xs < cx], xs[xs >= cx]
-        assert left_xs.size > 0 and right_xs.size > 0
-        return int(right_xs.min() - left_xs.max())
+        ys, _ = np.where(np.all(frame == JAW_COLOR, axis=-1))
+        assert ys.size > 0, "젓가락이 화면에 그려지지 않았다"
+        pivot_y = renderer._to_px(*target)[1]
+        return int(np.max(np.abs(ys - pivot_y)))
 
-    gaps = [inner_gap_px(g) for g in (0.0, 0.5, 1.0)]
-    assert gaps[0] > gaps[1] > gaps[2], gaps
+    wide = vertical_spread_px(0.0)
+    mid = vertical_spread_px(0.5)
+    tight = vertical_spread_px(1.0)
+    assert wide > mid > tight, (wide, mid, tight)
     renderer.close()
 
 

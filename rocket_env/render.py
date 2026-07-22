@@ -80,7 +80,12 @@ JAW_BACK_COLOR = (196, 128, 42)   # 뒤쪽 팔 — 그늘져 어둡게
 JAW_CLOSED_HALF = 5.0     # 다 물었을 때 턱 안쪽 간격 (m)
 # 카메라가 약간 위에서 내려다본다고 가정한다. 뒤쪽 팔은 화면에서 위로,
 # 앞쪽 팔은 아래로 어긋나게 그려 둘이 구분되고, 로켓이 그 사이에 물린다.
-ARM_DEPTH = 5.0           # 앞뒤 팔의 화면 어긋남 (m)
+# 젓가락은 마스트의 피봇에서 회전한다. 벌어지면 팁이 위아래로 갈라지고
+# 조이면 수평으로 모인다 — 평행이동이 아니라 회전이라야 경첩처럼 보인다.
+JAW_OPEN_SPREAD = 15.0    # 벌어졌을 때 팁의 수직 벌어짐 (m)
+JAW_CLOSE_SPREAD = 4.0    # 다 조였을 때 (m)
+JAW_TRUSS_HALF = 1.5      # 젓가락 트러스 폭의 절반 (m) — 본체보다 가늘다
+JAW_TRUSS_BAY = 6.0
 # 로켓이 이만큼 위로 접근하면 집게가 오므라들기 시작한다. 잡히는 순간에만
 # 닫히면 동작이 보이지 않는다.
 GRIP_APPROACH_RANGE = 45.0
@@ -88,7 +93,7 @@ GRIP_ALIGN_RANGE = 3.0    # 수평 정렬이 이 배수 안이어야 닫기 시�
 BODY_COLOR = (232, 234, 238)
 BODY_HALF_W = 4.2          # 원통 반지름 (m)
 # 상단 걸림 구조(리프트 포인트). 젓가락이 이 돌기에 걸려 기체를 든다.
-PIN_Y = 16.0               # 기체 좌표에서의 높이
+PIN_Y = ROCKET_HEIGHT / 2.0 - 2.0   # 기체 맨 위 (걸림쇠는 최상단에 있다)
 PIN_OUT = 3.4              # 몸통 밖으로 튀어나온 길이
 PIN_THICK = 1.6
 PIN_COLOR = (176, 182, 194)
@@ -217,8 +222,9 @@ class Renderer:
         # 팔에 얹힐 때까지 PIN_Y 만큼 부드럽게 미끄러져 내려간다. 판정은
         # 로켓 중심이 팔 높이를 지날 때 일어나므로, 그 지점에서 pin이
         # 팔에 닿으려면 중심이 PIN_Y 만큼 더 내려가야 한다.
-        # ease-out(1-(1-t)^3)이라 처음엔 빠르게 미끄러지고 끝에서 탁 멎는다.
-        eased = 1.0 - (1.0 - min(max(settle, 0.0), 1.0)) ** 3
+        # ease-out 지수를 3에서 2로 낮춰 초반 가속을 줄였다. 3제곱은 첫
+        # 몇 프레임에 대부분을 내려와 버려서 "미끄러진다"기보다 튄다.
+        eased = 1.0 - (1.0 - min(max(settle, 0.0), 1.0)) ** 2
         return replace(state, y=state.y - PIN_Y * eased, thrust=0.0)
 
     # --- 카메라 ---
@@ -419,22 +425,49 @@ class Renderer:
             pygame.draw.line(self.surface, TOWER_COLOR,
                              self._to_px(a, lo), self._to_px(b, hi), brace)
 
+    def _truss_line(self, x0: float, y0: float, x1: float, y1: float,
+                    half_w: float, bay: float, color) -> None:
+        """임의 방향 트러스. 두 줄기와 지그재그 브레이스로 엮는다."""
+        dx, dy = x1 - x0, y1 - y0
+        length = math.hypot(dx, dy)
+        if length < 1e-6:
+            return
+        # 진행 방향의 법선으로 줄기를 벌린다
+        nx, ny = -dy / length * half_w, dx / length * half_w
+        rail = self._scaled_width(2.2, min_px=1)
+        brace = self._scaled_width(1.4, min_px=1)
+        for sign in (-1, 1):
+            pygame.draw.line(
+                self.surface, color,
+                self._to_px(x0 + sign * nx, y0 + sign * ny),
+                self._to_px(x1 + sign * nx, y1 + sign * ny), rail)
+        bays = max(3, int(length / bay))
+        for i in range(bays):
+            ta, tb = i / bays, (i + 1) / bays
+            ax, ay = x0 + dx * ta, y0 + dy * ta
+            bx, by = x0 + dx * tb, y0 + dy * tb
+            s0, s1 = (1, -1) if i % 2 == 0 else (-1, 1)
+            pygame.draw.line(
+                self.surface, color,
+                self._to_px(ax + s0 * nx, ay + s0 * ny),
+                self._to_px(bx + s1 * nx, by + s1 * ny), brace)
+
     def _draw_jaws(self, x_tower: float, y_arm: float, window_half: float,
                    grip: float, *, front: bool) -> None:
-        """포획 창 자리에 달린 턱 한 쌍. grip 0(벌어짐) -> 1(다 묾).
+        """마스트의 피봇에서 회전하는 젓가락 한 짝.
 
-        카메라가 약간 위에서 내려다본다고 보고, 뒤쪽 팔은 화면에서 위로,
-        앞쪽 팔은 아래로 어긋나게 그린다. 뒤쪽은 그늘져 어둡고 얇다.
+        평행이동이 아니라 회전이다 — 피봇은 타워 쪽에 고정돼 있고, 팁만
+        위아래로 갈라졌다 모인다. 벌어지면 로켓이 들어올 틈이 생기고,
+        조이면 기체를 사이에 문다. 본체 트러스보다 가늘게 그려 구조물과
+        구분되게 한다.
         """
-        inner = window_half + (JAW_CLOSED_HALF - window_half) * grip
-        depth = ARM_DEPTH if front else -ARM_DEPTH
+        pivot_x = x_tower - TOWER_OFFSET
+        tip_x = x_tower + max(window_half * 1.4, 12.0)
+        spread = JAW_OPEN_SPREAD + (JAW_CLOSE_SPREAD - JAW_OPEN_SPREAD) * grip
+        sign = -1.0 if front else 1.0
         color = JAW_COLOR if front else JAW_BACK_COLOR
-        width = self._scaled_width(9.0 if front else 7.0, min_px=3)
-        for sign in (-1, 1):
-            root = self._to_px(x_tower + sign * (window_half + 12.0),
-                               y_arm - depth)
-            tip = self._to_px(x_tower + sign * inner, y_arm - depth)
-            pygame.draw.line(self.surface, color, root, tip, width)
+        self._truss_line(pivot_x, y_arm, tip_x, y_arm + sign * spread,
+                         JAW_TRUSS_HALF, JAW_TRUSS_BAY, color)
 
     def _front_arm(self, target: tuple[float, float], grip: float) -> None:
         """앞쪽 팔. 로켓을 그린 뒤 호출해 기체 위에 덮는다."""
@@ -589,14 +622,6 @@ class Renderer:
             pygame.draw.polygon(self.surface, PIN_COLOR,
                                 [poly(state, bx, by) for bx, by in pin])
 
-        # 그리드핀: 실물처럼 상단 근처에 단다
-        fins = [(BODY_HALF_W, PIN_Y - 9.0), (BODY_HALF_W + 5.5, PIN_Y - 12.5),
-                (BODY_HALF_W, PIN_Y - 3.0)]
-        for sign in (-1, 1):
-            pygame.draw.polygon(
-                self.surface, FIN_COLOR,
-                [poly(state, sign * bx, by) for bx, by in fins])
-
         self._paint_livery(state)
         self._flame(state)
 
@@ -629,19 +654,28 @@ class Renderer:
             center=self._body_to_px(state, 0.0, 2.0)))
 
     def _flame(self, state: State) -> None:
+        """추력 단계에 따라 길이·굵기·색이 뚜렷이 달라지는 화염.
+
+        행동 테이블의 추력은 0 / 0.2G / 1.0G / 2.0G 네 단계다. 길이를 선형으로
+        잡으면 0.2G와 1.0G가 비슷해 보여 단계가 구분되지 않는다. 지수를
+        0.75로 눌러 낮은 단계도 짧게, 최대 단계는 확실히 길게 만든다.
+        """
         if state.thrust <= 0.0:
             return
-        length = 6.0 + 22.0 * (state.thrust / (2.0 * G))
-        nozzle = (0.0, -ROCKET_HEIGHT / 2.0)
+        ratio = state.thrust / (2.0 * G)
+        length = 5.0 + 40.0 * ratio ** 0.75
+        half_w = 1.6 + 2.4 * ratio
+        # 약한 분사는 노란빛, 강한 분사는 흰빛이 도는 주황
+        color = ((255, 214, 92) if ratio < 0.3
+                 else (255, 158, 66) if ratio < 0.7 else (255, 236, 190))
+        base = -ROCKET_HEIGHT / 2.0
         tip = (length * math.sin(state.phi),
-               -ROCKET_HEIGHT / 2.0 - length * math.cos(state.phi))
-        color = (255, 210, 90) if state.thrust < 1.5 * G else (255, 140, 60)
-        points = [
-            self._body_to_px(state, nozzle[0] - 3.0, nozzle[1]),
-            self._body_to_px(state, nozzle[0] + 3.0, nozzle[1]),
+               base - length * math.cos(state.phi))
+        pygame.draw.polygon(self.surface, color, [
+            self._body_to_px(state, -half_w, base),
+            self._body_to_px(state, half_w, base),
             self._body_to_px(state, tip[0], tip[1]),
-        ]
-        pygame.draw.polygon(self.surface, color, points)
+        ])
 
     def _hud(self, state: State) -> None:
         speed = math.hypot(state.vx, state.vy)
