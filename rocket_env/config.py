@@ -70,9 +70,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # 1.0이어야 shaping 총합이 정확히 Φ(s_T) - Φ(s_0)로 접힌다.
         # γ<1이면 에피소드가 길수록 shaping 총합이 커지는 편향이 생긴다.
         "shaping_gamma": 1.0,
-        "shaping_w_dist": 1.0,
-        "shaping_w_attitude": 0.5,
-        "shaping_w_speed": 0.5,
+        # 총합이 정확히 0이므로 점수에는 영향이 없다. 값이 클수록 스텝당
+        # 학습 신호가 강해진다. 예전 값(1.0/0.5/0.5)에서는 shaping 이
+        # 리턴의 1% 미만이라 탐색을 전혀 안내하지 못했다.
+        "shaping_w_dist": 20.0,
+        "shaping_w_attitude": 10.0,
+        "shaping_w_speed": 10.0,
         "fuel_penalty": 0.05,
     },
 }

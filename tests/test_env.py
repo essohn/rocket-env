@@ -81,12 +81,21 @@ def test_info_contains_every_contract_key():
 
 
 def test_same_seed_reproduces_identical_trajectories():
+    """같은 시드는 같은 궤적을, 다른 시드는 다른 궤적을 만든다.
+
+    Task 17 이후 shaping 총합이 정확히 0으로 상쇄되고, landing-gust의 NOOP
+    낙하는 항상 impact_speed가 v_max의 2배를 넘어 실패 점수도 0으로
+    포화된다. 그래서 에피소드 점수(total)는 더 이상 시드 차이를 드러내는
+    신호가 아니다 — 두 시드 모두 total=0.0 이 나오지만 궤적 자체는 다르다.
+    대신 시드에 직접 의존하는 wind_x로 궤적이 실제로 갈라지는지 확인한다.
+    """
     env = RocketEnv(config=PRESETS["landing-gust"])
-    a, _ = rollout(env, NOOP, seed=123)
-    b, _ = rollout(env, NOOP, seed=123)
-    c, _ = rollout(env, NOOP, seed=124)
+    a, info_a = rollout(env, NOOP, seed=123)
+    b, info_b = rollout(env, NOOP, seed=123)
+    _, info_c = rollout(env, NOOP, seed=124)
     assert a == b
-    assert a != c
+    assert info_a["wind_x"] == info_b["wind_x"]
+    assert info_a["wind_x"] != info_c["wind_x"]
 
 
 def test_config_seed_is_not_consumed_by_the_env():

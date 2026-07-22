@@ -56,6 +56,7 @@ class RocketEnv(gym.Env):
         self.state = None
         self._target = self.task.target(self.cfg)
         self._potential = 0.0
+        self._initial_potential = 0.0
         self._outcome = Outcome.IN_PROGRESS
 
     # --- Gymnasium API ---
@@ -71,6 +72,8 @@ class RocketEnv(gym.Env):
 
         self._target = self.task.target(self.cfg)
         self._potential = potential(self.state, self._target, self.cfg)
+        # 종료 시 되돌려주어 shaping 총합을 정확히 0으로 만든다.
+        self._initial_potential = self._potential
         self._outcome = Outcome.IN_PROGRESS
 
         if self._renderer is not None:
@@ -107,7 +110,11 @@ class RocketEnv(gym.Env):
 
         terminated = outcome is not None and not truncated
 
-        cur_potential = potential(cur, self._target, self.cfg)
+        # 종료 상태의 Φ 는 0으로 둔다. 그러면 망원경 합이 -Φ(s₀) 가 되고,
+        # 아래에서 Φ(s₀) 를 되돌려주면 총합이 정확히 0이 된다. shaping 은
+        # 학습 신호로만 작동하고 점수에는 기여하지 않는다.
+        cur_potential = (0.0 if outcome is not None
+                         else potential(cur, self._target, self.cfg))
         reward = (shaping(self._potential, cur_potential, self.cfg)
                   - self.cfg["reward"]["fuel_penalty"] * used)
         self._potential = cur_potential
@@ -115,6 +122,7 @@ class RocketEnv(gym.Env):
         impact_speed = None
         if outcome is not None:
             self._outcome = outcome
+            reward += self._initial_potential
             reward += terminal_reward(outcome, cur, self._target, self.cfg,
                                       self._fuel_frac())
             if outcome != Outcome.TIMEOUT:
