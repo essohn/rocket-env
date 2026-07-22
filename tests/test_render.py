@@ -5,10 +5,12 @@
 있는 두 지점 — 포획 창 폭과 렌더러 여러 개의 수명 — 은 따로 고정한다.
 """
 
+import math
 import os
 from dataclasses import replace
 
 import numpy as np
+import pygame
 import pytest
 
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
@@ -178,4 +180,107 @@ def test_caught_rocket_is_drawn_hanging_below_the_arm():
 
     # SUCCESS가 아니거나 catch 태스크가 아니면 원본을 그대로 돌려준다.
     assert renderer._catch_draw_state(state, Outcome.IN_PROGRESS) is state
+    renderer.close()
+
+
+def test_livery_rotates_with_the_hull_not_against_it():
+    """도색이 동체와 같은 방향으로 돌아야 한다.
+
+    과거 버그: rotozoom에 -theta를 넘겨 글자가 기체와 반대로 돌았다.
+    작은 각도(예: 14도)에서는 부호가 틀려도 거의 비슷해 보여 회귀를
+    못 잡는다. ±70도라는 큰 각으로, 그것도 픽셀을 직접 세어 확인한다.
+
+    도색 서피스를 위(노즈 쪽)는 빨강, 아래(핀 쪽)는 파랑인 마커로 바꿔치기
+    한 뒤 실제 draw() 로 그려서, 빨강 무게중심이 파랑보다 노즈 방향으로
+    더 나아가 있는지를 잰다. 부호가 뒤집히면 이 관계가 깨진다 — 실제로
+    수정 전 코드로 이 테스트를 돌려 실패를 확인했다.
+    """
+    cfg = build_config(PRESETS["landing-descent"])
+    renderer = Renderer(cfg, "rgb_array")
+
+    w, h = renderer._livery.get_size()
+    marker = pygame.Surface((w, h), pygame.SRCALPHA)
+    marker.fill((255, 0, 0, 255), pygame.Rect(0, 0, w, h // 2))
+    marker.fill((0, 0, 255, 255), pygame.Rect(0, h // 2, w, h - h // 2))
+    renderer._livery = marker
+
+    state = replace(a_state(cfg), x=0.0, y=200.0, thrust=0.0)
+    for deg in (70.0, -70.0):
+        s = replace(state, theta=math.radians(deg))
+        frame = renderer.draw(s, (0.0, 25.0), Outcome.IN_PROGRESS)
+
+        center = np.array(renderer._body_to_px(s, 0.0, 2.0), dtype=float)
+        nose_vec = np.array(renderer._body_to_px(s, 0.0, 20.0), dtype=float) - center
+
+        red_ys, red_xs = np.where(np.all(frame == [255, 0, 0], axis=-1))
+        blue_ys, blue_xs = np.where(np.all(frame == [0, 0, 255], axis=-1))
+        assert red_xs.size > 0 and blue_xs.size > 0
+
+        red_centroid = np.array([red_xs.mean(), red_ys.mean()])
+        blue_centroid = np.array([blue_xs.mean(), blue_ys.mean()])
+        red_proj = np.dot(red_centroid - center, nose_vec)
+        blue_proj = np.dot(blue_centroid - center, nose_vec)
+        assert red_proj > blue_proj, (
+            f"theta={deg}deg: 노즈 쪽(빨강)이 핀 쪽(파랑)보다 노즈 방향으로 "
+            "더 나아가 있어야 한다")
+    renderer.close()
+
+
+def test_clouds_are_deterministic_across_renderers():
+    """같은 시드로 만든 구름은 렌더러를 새로 만들어도 같다.
+
+    구름은 에피소드마다, 렌더러 인스턴스마다 다시 만들어지므로(매번
+    `_build_clouds`를 호출) 고정 시드가 아니면 매 실행마다 하늘이 달라져
+    재현성이 깨진다.
+    """
+    cfg = build_config(PRESETS["landing-descent"])
+    first = Renderer(cfg, "rgb_array")
+    second = Renderer(cfg, "rgb_array")
+    assert first._clouds == second._clouds
+    first.close()
+    second.close()
+
+
+def test_jaws_close_as_grip_increases():
+    """grip 이 커질수록 화면에 그려지는 턱의 안쪽 간격이 좁아진다.
+
+    내부 공식을 재계산하지 않고, 실제로 그려진 JAW_COLOR 픽셀을 스캔해
+    두 턱의 가장 안쪽(중앙에 가장 가까운) 픽셀 사이 거리를 잰다 — 그래야
+    `_draw_jaws`가 실제로 무엇을 그리는지 검증한 것이 된다.
+    """
+    from rocket_env.render import JAW_COLOR
+
+    cfg = build_config(PRESETS["catch"])
+    renderer = Renderer(cfg, "rgb_array")
+    target = (cfg["catch"]["x_tower"], cfg["catch"]["y_arm"])
+    # 로켓을 팔에서 충분히 떨어뜨려 두어 몸통이 턱 픽셀을 가리지 않게 한다.
+    state = replace(a_state(cfg), x=target[0], y=target[1] + 80.0, theta=0.0)
+
+    def inner_gap_px(grip: float) -> int:
+        frame = renderer.draw(state, target, Outcome.IN_PROGRESS, grip=grip)
+        ys, xs = np.where(np.all(frame == JAW_COLOR, axis=-1))
+        assert xs.size > 0, "턱이 화면에 그려지지 않았다"
+        cx = renderer._to_px(*target)[0]
+        left_xs, right_xs = xs[xs < cx], xs[xs >= cx]
+        assert left_xs.size > 0 and right_xs.size > 0
+        return int(right_xs.min() - left_xs.max())
+
+    gaps = [inner_gap_px(g) for g in (0.0, 0.5, 1.0)]
+    assert gaps[0] > gaps[1] > gaps[2], gaps
+    renderer.close()
+
+
+def test_tower_mast_is_drawn_beside_the_capture_point():
+    """마스트 x 좌표가 x_tower 보다 왼쪽이다 — 로켓이 타워 위가 아니라
+    옆에 잡힌다."""
+    cfg = build_config(PRESETS["catch"])
+    renderer = Renderer(cfg, "rgb_array")
+    target = (cfg["catch"]["x_tower"], cfg["catch"]["y_arm"])
+    x_tower, _, _, _ = renderer._catch_geometry(target)
+
+    from rocket_env.render import TOWER_OFFSET
+    assert TOWER_OFFSET > 0.0
+
+    mast_x = x_tower - TOWER_OFFSET
+    assert mast_x < x_tower
     renderer.close()

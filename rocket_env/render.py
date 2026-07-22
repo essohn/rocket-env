@@ -35,13 +35,29 @@ MAX_PARTICLES = 500
 PARTICLE_LIFE = 1.2          # 초
 SMOKE_COLOR = (215, 215, 225)
 
+# --- 구름 ---
+# 배경이 단색 그라디언트뿐이면 34 m/s 로 떨어지든 2 m/s 로 기어가든 화면상
+# 차이가 없다. 구름을 월드 좌표에 고정해 두면 카메라가 내려가며 스쳐
+# 지나가서 하강 속도가 눈으로 느껴진다.
+CLOUD_COUNT = 34
+CLOUD_COLOR = (238, 242, 250)
+CLOUD_SEED = 20260722
+
+# --- 타워(포획) ---
+# 마스트를 포획 지점(x_tower)에서 왼쪽으로 물려 그린다 — 물리 목표는
+# 그대로 x_tower 다, 그림만 옆으로 옮긴다. 실제 Mechazilla가 타워 옆에서
+# 팔을 뻗어 붙잡는 모습을 흉내낸다.
+TOWER_OFFSET = 55.0
+TOWER_HEIGHT_FACTOR = 1.6
+
 SKY_TOP = (12, 18, 40)
 SKY_BOTTOM = (70, 96, 140)
 GROUND_COLOR = (38, 40, 44)
 PAD_COLOR = (200, 190, 90)
 TOWER_COLOR = (150, 155, 165)
 ARM_COLOR = (230, 120, 60)
-GRIP_COLOR = (255, 180, 70)
+JAW_COLOR = (255, 175, 60)
+JAW_CLOSED_HALF = 5.0     # 다 물었을 때 턱 안쪽 간격 (m)
 BODY_COLOR = (232, 234, 238)
 FIN_COLOR = (120, 125, 135)
 TRAIL_COLOR = (90, 160, 220)
@@ -86,6 +102,9 @@ class Renderer:
         self._sky_surface = self._build_sky()
         # 기체 도색도 마찬가지로 한 번만 만들어 캐시한다.
         self._livery = self._build_livery()
+        # 구름도 고정 시드로 한 번 만들어 재사용한다 — 매 에피소드, 매
+        # 렌더러 인스턴스에서 같은 하늘이 보여야 한다(재현성).
+        self._clouds = self._build_clouds()
 
     # --- 공개 API ---
 
@@ -95,16 +114,22 @@ class Renderer:
         self._particles = []
 
     def draw(self, state: State, target: tuple[float, float],
-             outcome: str):
+             outcome: str, grip: float = 0.0):
+        """한 프레임을 그린다.
+
+        `grip`은 순전히 연출용 상태다(0=벌어짐, 1=다 묾) — 물리에는
+        전혀 관여하지 않는다. 기본값 0.0이라 기존 호출부(테스트 등)는
+        그대로 동작한다.
+        """
         draw_state = self._catch_draw_state(state, outcome)
-        caught = draw_state is not state
 
         self._update_camera(draw_state, target)
         self._update_particles(draw_state)
 
         self.surface.blit(self._sky_surface, (0, 0))
+        self._draw_clouds()
         self._ground()
-        self._structure(target, caught)
+        self._structure(target, grip)
         self._draw_particles()
 
         self.trail.append(self._to_px(draw_state.x, draw_state.y))
@@ -198,6 +223,52 @@ class Renderer:
             pygame.draw.line(sky, color, (0, row), (WIDTH, row))
         return sky
 
+    def _build_clouds(self) -> list[dict]:
+        """월드 좌표에 고정된 구름. 카메라가 내려가면 스쳐 지나가며
+        하강 속도를 눈으로 알 수 있게 한다."""
+        rng = np.random.default_rng(CLOUD_SEED)
+        clouds = []
+        for _ in range(CLOUD_COUNT):
+            # 로켓(50 m)보다 확실히 작게 잡는다. 반경이 40 m 까지 커지면
+            # 화면을 덮고 HUD 뒤로 겹쳐 값을 읽기 어려워진다. 작고 많은
+            # 쪽이 같은 속도 단서를 주면서 하늘처럼 보인다.
+            r = float(rng.uniform(7.0, 20.0))
+            clouds.append({
+                "x": float(rng.uniform(WORLD_X_MIN - 120.0, WORLD_X_MAX + 120.0)),
+                "y": float(rng.uniform(70.0, 540.0)),
+                "r": r,
+                # 알파가 낮으면 어두운 남색 하늘 위에서 흰 구름이 탁한 회색
+                # 덩어리가 되어 먹구름처럼 읽힌다. 충분히 올려야 의도한
+                # 밝은 색이 나온다.
+                "alpha": int(rng.integers(150, 215)),
+                # 뭉게구름처럼 보이도록 원을 몇 개 겹친다
+                "puffs": [(float(rng.uniform(-1.3, 1.3)) * r,
+                           float(rng.uniform(-0.35, 0.35)) * r,
+                           float(rng.uniform(0.55, 1.0)) * r) for _ in range(5)],
+            })
+        return clouds
+
+    def _draw_clouds(self) -> None:
+        # 연기 입자와 같은 이유로, 알파 서피스 한 장에 전부 그린 뒤 한 번만
+        # blit한다 — 구름마다 서피스를 새로 만들면 18개를 매 프레임 blit
+        # 하게 되어 낭비다.
+        _, _, scale = self._cam
+        overlay = None
+        for cloud in self._clouds:
+            cx, cy = self._to_px(cloud["x"], cloud["y"])
+            reach = int(cloud["r"] * 1.5 * scale) + 20
+            if cx + reach < 0 or cx - reach > WIDTH or cy + reach < 0 or cy - reach > HEIGHT:
+                continue  # 화면 밖 구름은 건너뛴다
+            if overlay is None:
+                overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            color = (*CLOUD_COLOR, cloud["alpha"])
+            for dx, dy, pr in cloud["puffs"]:
+                center = (cx + int(dx * scale), cy + int(dy * scale))
+                radius = max(2, int(pr * scale))
+                pygame.draw.circle(overlay, color, center, radius)
+        if overlay is not None:
+            self.surface.blit(overlay, (0, 0))
+
     def _ground(self) -> None:
         # 카메라가 움직이므로 지면은 더 이상 화면 하단 고정 띠가 아니다.
         # y=0 이 화면의 어디에 오는지 계산해 그 아래를 채운다 — 안 그러면
@@ -209,40 +280,70 @@ class Renderer:
                 self.surface, GROUND_COLOR,
                 pygame.Rect(0, ground_top, WIDTH, HEIGHT - ground_top))
 
-    def _structure(self, target: tuple[float, float], caught: bool) -> None:
+    def _structure(self, target: tuple[float, float], grip: float) -> None:
         if self.cfg["task"] == "landing":
             radius = self.cfg["success"]["zone_r"]
             left = self._to_px(-radius, 0.0)
             right = self._to_px(radius, 0.0)
-            pygame.draw.line(self.surface, PAD_COLOR, left, right, 6)
+            pygame.draw.line(self.surface, PAD_COLOR, left, right,
+                             self._scaled_width(6.0))
             return
 
         x_tower, y_arm, arm_half, window_half = self._catch_geometry(target)
-        base = self._to_px(x_tower, 0.0)
-        top = self._to_px(x_tower, y_arm * 1.25)
-        pygame.draw.line(self.surface, TOWER_COLOR, base, top, 8)
+        # 마스트는 포획 지점 정중앙이 아니라 왼쪽으로 물러난 자리에 선다 —
+        # 그래야 로켓이 타워 "위"가 아니라 "옆"에 잡힌 것처럼 보인다.
+        mast_x = x_tower - TOWER_OFFSET
+        mast_top = y_arm * TOWER_HEIGHT_FACTOR
 
-        if caught:
-            # 포획 순간: 창 자리에 로켓 폭까지 좁혀진 집게를 그린다 —
-            # 팔이 안쪽으로 뻗어 로켓을 감싸는 연출.
-            for sign in (-1, 1):
-                outer = self._to_px(x_tower + sign * arm_half, y_arm)
-                inner = self._to_px(x_tower + sign * 6.0, y_arm)
-                pygame.draw.line(self.surface, GRIP_COLOR, outer, inner, 13)
-            return
-
-        # 평소: 구조물(회색, 넓게) + 포획 창(주황, ±zone_r). 팔 구조물은
-        # 포획 창보다 넓게 그린다 — 6 m 는 화면에서 몇 px 밖에 안 돼서
-        # 구조물로 알아보기 어렵다.
         pygame.draw.line(self.surface, TOWER_COLOR,
-                         self._to_px(x_tower - arm_half, y_arm),
-                         self._to_px(x_tower + arm_half, y_arm), 7)
+                         self._to_px(mast_x, 0.0), self._to_px(mast_x, mast_top),
+                         self._scaled_width(8.0))
+        # 격자 살대 — 기둥 하나만 그리면 마스트가 아니라 깃대처럼 보인다.
+        for frac in (0.2, 0.45, 0.7, 0.92):
+            y = mast_top * frac
+            pygame.draw.line(self.surface, TOWER_COLOR,
+                             self._to_px(mast_x - 7.0, y),
+                             self._to_px(mast_x + 7.0, y),
+                             self._scaled_width(3.0, min_px=1))
+
+        # 가로보(cantilever): 마스트에서 포획 지점 너머까지 옆으로 뻗는다.
+        pygame.draw.line(self.surface, TOWER_COLOR,
+                         self._to_px(mast_x, y_arm),
+                         self._to_px(x_tower + arm_half, y_arm),
+                         self._scaled_width(7.0))
+
         # 실제 포획 판정 범위(±zone_r). 이걸 따로 그리지 않으면 학생은
         # 팔 안쪽으로 잘 지나간 것처럼 보이는데 MISSED 가 뜨는 이유를
         # 알 수 없다. 디버깅하라고 만든 그림이 디버깅을 방해하게 된다.
         pygame.draw.line(self.surface, ARM_COLOR,
                          self._to_px(x_tower - window_half, y_arm),
-                         self._to_px(x_tower + window_half, y_arm), 11)
+                         self._to_px(x_tower + window_half, y_arm),
+                         self._scaled_width(11.0))
+
+        # 젓가락은 가로보 위에 그려야 구조물에 달린 것처럼 보인다 — 가로보를
+        # 먼저 그리고 그 위에 덧그린다.
+        self._draw_jaws(x_tower, y_arm, window_half, grip)
+
+    def _draw_jaws(self, x_tower: float, y_arm: float, window_half: float,
+                   grip: float) -> None:
+        """포획 창 자리에 달린 두 턱. grip 0(벌어짐) -> 1(다 묾)으로 오므라든다."""
+        inner = window_half + (JAW_CLOSED_HALF - window_half) * grip
+        width = self._scaled_width(9.0, min_px=3)
+        for sign in (-1, 1):
+            root = self._to_px(x_tower + sign * (window_half + 12.0), y_arm)
+            tip = self._to_px(x_tower + sign * inner, y_arm)
+            pygame.draw.line(self.surface, JAW_COLOR, root, tip, width)
+
+    def _scaled_width(self, base_px: float, min_px: int = 2) -> int:
+        """카메라 배율에 맞춰 선 굵기를 조정한다.
+
+        MIN_SCALE(세계 전체가 보이는 최소 배율)에서 base_px로 보이도록
+        맞춘 값이라, 줌인할수록 그만큼 굵어져야 로켓 크기 대비 두께가
+        일정하게 유지된다. 줌인 폭이 커진 지금은 고정 px로는 하이라인이
+        되어버려서 최소값으로 하한을 둔다.
+        """
+        _, _, scale = self._cam
+        return max(min_px, int(round(base_px * scale / MIN_SCALE)))
 
     def _catch_geometry(self, target: tuple[float, float]):
         """타워 x, 팔 높이, 팔 반폭, 실제 포획 창 반폭을 돌려준다.
@@ -257,7 +358,8 @@ class Renderer:
     def _trail(self) -> None:
         if len(self.trail) < 2:
             return
-        pygame.draw.lines(self.surface, TRAIL_COLOR, False, self.trail[-400:], 2)
+        pygame.draw.lines(self.surface, TRAIL_COLOR, False, self.trail[-400:],
+                          self._scaled_width(2.0, min_px=1))
 
     # --- 연기 입자 ---
 
@@ -350,9 +452,13 @@ class Renderer:
         zoom = (ROCKET_HEIGHT * 0.55 * scale) / self._livery.get_height()
         if zoom <= 0.05:
             return
-        # 화면 y축이 뒤집혀 있고 pygame 회전은 반시계 방향이라 부호는
-        # 눈으로 확인했다 — 로켓이 기울면 글자도 기체와 같은 방향으로 기운다.
-        art = pygame.transform.rotozoom(self._livery, -math.degrees(state.theta), zoom)
+        # body_to_px가 만드는 노즈 방향(화면 벡터)은 (-sinθ, -cosθ)다.
+        # pygame.transform.rotozoom(φ)은 이미지의 "위"를 화면 벡터
+        # (-sinφ, -cosφ)로 돌린다(양의 φ가 화면에서 반시계 방향). 두 벡터가
+        # 같으려면 φ = θ 여야 한다 — 부호를 뒤집으면 글자가 기체와 반대로
+        # 돌아 큰 각도(±30° 이상)에서 뚜렷하게 어긋난다. ±30°/±70°로 실제
+        # 렌더링해 확인했다(계산이 아니라 픽셀로).
+        art = pygame.transform.rotozoom(self._livery, math.degrees(state.theta), zoom)
         self.surface.blit(art, art.get_rect(
             center=self._body_to_px(state, 0.0, 2.0)))
 

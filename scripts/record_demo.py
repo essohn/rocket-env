@@ -12,7 +12,9 @@
        (시드 10000+i, deterministic=True)로 평가하면서 매 프레임을 모은다.
     3. 가장 좋은 에피소드 — 성공 우선, 동점이면 점수 — 를 골라 영상으로
        쓴다(전부 실패면 점수가 가장 높은 실패를 대신 고른다).
-    4. 골라진 에피소드로 mp4와, 그걸 축소 재인코딩한 gif를 각각 쓴다.
+    4. 캐치 성공이면 젓가락이 닫히는 마무리 연출 프레임을 덧붙이고, 착륙
+       성공이면 정지 프레임만 덧붙여 끝이 급하지 않게 한다.
+    5. 골라진 에피소드로 mp4와, 그걸 축소 재인코딩한 gif를 각각 쓴다.
 
 인코딩은 새 의존성을 늘리지 않으려고 PATH의 ffmpeg에 프레임을
 stdin으로 그대로 흘려보낸다. `subprocess`/`ffmpeg`/`stable_baselines3`는
@@ -36,6 +38,12 @@ from rocket_env.config import PRESETS
 
 EVAL_EPISODE_COUNT_DEFAULT = 20
 ARTIFACTS_DIR = Path(__file__).resolve().parent.parent / "artifacts"
+
+# --- 마무리 연출 ---
+# 캐치 성공 영상은 팔에 매달린 순간 끝나버리면 "잡았다"는 느낌이 없다.
+# 마지막 상태 그대로 젓가락만 닫아가며 몇 프레임 더 그린다.
+GRIP_FRAMES = 14      # grip 0 -> 1로 닫히는 구간
+HOLD_FRAMES = 24      # 다 물고 정지해 있는 구간 (fps=20 기준 약 1.2초)
 
 
 def default_model_path(preset: str, seed: int) -> Path:
@@ -66,6 +74,39 @@ def train_or_load(env, model_path: Path, *, steps: int, lr: float, seed: int):
     return model
 
 
+def closing_frames(env, outcome: str, is_success: bool) -> list[np.ndarray]:
+    """에피소드의 마지막 상태로 마무리 연출 프레임을 만든다.
+
+    캐치 성공이면 젓가락이 grip 0 -> 1로 닫히는 GRIP_FRAMES에 이어, 다 문
+    채(grip=1.0) 정지한 HOLD_FRAMES를 붙인다. 로켓은 `_catch_draw_state`가
+    이미 팔에 매단 위치·자세 0·추력 0으로 그리므로 이 구간 내내 완전히
+    정지해 보인다. 착륙 성공은 젓가락이 없으니 HOLD_FRAMES만 붙여 영상
+    끝이 급하지 않게 한다. 실패로 끝난 에피소드는 붙일 연출이 없다.
+
+    `env.unwrapped._renderer`는 env.render()가 처음 호출될 때 만들어
+    캐시해 두는 내부 필드라 공개 접근자가 없다 — grip을 프레임마다 바꿔
+    그려야 해서 env.render()가 고정해 넘기는 grip(catch 논리)을 우회해야
+    이 함수가 성립한다.
+    """
+    if not is_success:
+        return []
+    base = env.unwrapped
+    state = base.state
+    target = base.task.target(base.cfg)
+    renderer = base._renderer
+    is_catch = base.cfg["task"] == "catch"
+
+    frames = []
+    if is_catch:
+        for i in range(GRIP_FRAMES):
+            frames.append(renderer.draw(state, target, outcome,
+                                        grip=i / (GRIP_FRAMES - 1)))
+    hold_grip = 1.0 if is_catch else 0.0
+    frames.extend(renderer.draw(state, target, outcome, grip=hold_grip)
+                  for _ in range(HOLD_FRAMES))
+    return frames
+
+
 def run_episode(env, model, seed: int) -> dict:
     """한 에피소드를 끝까지 돌리며 프레임을 모은다."""
     obs, _ = env.reset(seed=seed)
@@ -78,11 +119,13 @@ def run_episode(env, model, seed: int) -> dict:
         obs, reward, done, truncated, info = env.step(action)
         score += float(reward)
         frames.append(env.render())
+    is_success = bool(info["is_success"])
     return {
         "seed": seed,
         "frames": frames,
+        "closing_frames": closing_frames(env, info["outcome"], is_success),
         "score": score,
-        "is_success": bool(info["is_success"]),
+        "is_success": is_success,
         "outcome": info["outcome"],
         "impact_speed": info["impact_speed"],
     }
@@ -168,9 +211,14 @@ def main() -> None:
         print("경고: 20개 에피소드 중 성공이 하나도 없어 "
               "가장 점수가 높은 실패 에피소드를 대신 기록한다.")
 
+    frames = best["frames"] + best["closing_frames"]
+    if best["closing_frames"]:
+        print(f"마무리 연출 프레임 {len(best['closing_frames'])}개 추가 "
+              f"(총 {len(frames)}프레임)")
+
     mp4_path = ARTIFACTS_DIR / f"{args.preset}-best.mp4"
     gif_path = ARTIFACTS_DIR / f"{args.preset}-best.gif"
-    frames_to_mp4(best["frames"], fps, mp4_path)
+    frames_to_mp4(frames, fps, mp4_path)
     mp4_to_gif(mp4_path, gif_path, fps=fps)
     print(f"mp4: {mp4_path}")
     print(f"gif: {gif_path}")
