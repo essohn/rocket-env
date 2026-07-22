@@ -24,8 +24,8 @@ import math
 from rocket_env.types import Outcome, State
 
 # 잠재함수의 정규화 상수. config에서 파생하지 않는 환경 상수다.
-POTENTIAL_DIST_SCALE = 300.0
-POTENTIAL_SPEED_SCALE = 50.0
+POTENTIAL_DIST_SCALE = 900.0
+POTENTIAL_SPEED_SCALE = 200.0
 
 # 판정 지점에 실제로 도달한 실패. 부분 점수를 받는다.
 _CONTACT_FAILURES = frozenset({

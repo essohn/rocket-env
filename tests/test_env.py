@@ -200,11 +200,11 @@ def test_observation_uses_distinct_scales_for_position_and_velocity():
     env.reset(seed=0)
     inner = env.unwrapped
     tx, ty = inner._target
-    inner.state = replace(inner.state, x=tx + 150.0, y=ty, vx=25.0, vy=0.0)
+    inner.state = replace(inner.state, x=tx + 450.0, y=ty, vx=100.0, vy=0.0)
     obs = inner._observation()
-    assert obs[0] == pytest.approx(0.5)    # 150 / 300
+    assert obs[0] == pytest.approx(0.5)    # 450 / 900
     assert obs[1] == pytest.approx(0.0)
-    assert obs[2] == pytest.approx(0.5)    # 25 / 50
+    assert obs[2] == pytest.approx(0.5)    # 100 / 200
     assert obs[3] == pytest.approx(0.0)
 
 

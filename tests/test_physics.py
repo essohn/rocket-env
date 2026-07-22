@@ -34,7 +34,7 @@ def test_action_table_has_12_entries_in_thrust_major_order():
     assert len(ACTION_TABLE) == 12
     assert ACTION_TABLE[0] == (0.0, -math.radians(120.0))
     assert ACTION_TABLE[1] == (0.0, 0.0)
-    assert ACTION_TABLE[11] == (2.0 * G, math.radians(120.0))
+    assert ACTION_TABLE[11] == (5.0 * G, math.radians(120.0))
 
 
 def test_single_freefall_step_matches_hand_computation():
@@ -50,8 +50,10 @@ def test_freefall_reaches_the_designed_terminal_velocity():
     DRAG_RHO를 종단속도에서 역산했으므로, 이 테스트는 계수 계산과 적분이
     서로 맞물려 돌아가는지 확인하는 독립적 검증이 된다.
     """
-    s = make_state(y=100_000.0)
-    for _ in range(2000):
+    # 종단속도 250 m/s 의 시정수는 약 25초(510스텝)다. 5배 이상 굴려야
+    # 수렴한다 — 예전 2000스텝은 49.5 m/s 시절 기준이었다.
+    s = make_state(y=1_000_000.0)
+    for _ in range(6000):
         s = integrate(s, thrust=0.0, nozzle_rate=0.0, wind_x=0.0)
     assert s.vy == pytest.approx(-TERMINAL_VELOCITY, abs=0.01)
 

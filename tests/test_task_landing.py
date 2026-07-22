@@ -63,8 +63,8 @@ def test_flying_off_the_top_crashes():
 
 
 def test_flying_off_the_side_crashes():
-    cur = at(x=301.0)
-    assert TASK.evaluate(at(x=299.0), cur, CFG) == Outcome.CRASH
+    cur = at(x=901.0)
+    assert TASK.evaluate(at(x=899.0), cur, CFG) == Outcome.CRASH
 
 
 def test_touchdown_exactly_at_speed_threshold_crashes():

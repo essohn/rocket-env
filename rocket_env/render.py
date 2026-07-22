@@ -308,7 +308,7 @@ class Renderer:
             r = float(rng.uniform(7.0, 20.0))
             clouds.append({
                 "x": float(rng.uniform(WORLD_X_MIN - 120.0, WORLD_X_MAX + 120.0)),
-                "y": float(rng.uniform(70.0, 540.0)),
+                "y": float(rng.uniform(120.0, 1650.0)),
                 "r": r,
                 # 알파가 낮으면 어두운 남색 하늘 위에서 흰 구름이 탁한 회색
                 # 덩어리가 되어 먹구름처럼 읽힌다. 충분히 올려야 의도한

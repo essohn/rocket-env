@@ -103,21 +103,21 @@ def test_unknown_nested_key_raises_config_error():
 @pytest.mark.parametrize("name,path,expected", [
     ("landing-basic", ("wind", "max_speed"), 0.0),
     ("landing-basic", ("fuel", "capacity"), None),
-    ("landing-basic", ("init", "y"), 200.0),
-    ("landing-basic", ("init", "x_range"), [-50.0, 50.0]),
+    ("landing-basic", ("init", "y"), 800.0),
+    ("landing-basic", ("init", "x_range"), [-120.0, 120.0]),
     ("landing-basic", ("init", "omega_abs_range_deg"), [12.0, 20.0]),
     ("landing-attitude", ("init", "theta_range_deg"), [-30.0, 30.0]),
-    ("landing-attitude", ("init", "y"), 200.0),
+    ("landing-attitude", ("init", "y"), 800.0),
     ("landing-attitude", ("init", "omega_abs_range_deg"), [12.0, 20.0]),
-    ("landing-descent", ("init", "y"), 300.0),
+    ("landing-descent", ("init", "y"), 1400.0),
     ("landing-descent", ("wind", "max_speed"), 0.0),
     ("landing-wind", ("wind", "mode"), "constant"),
     ("landing-wind", ("wind", "max_speed"), 8.0),
     ("landing-gust", ("wind", "ou_sigma"), 3.0),
-    ("landing-gust", ("fuel", "capacity"), 55.0),
+    ("landing-gust", ("fuel", "capacity"), 70.0),
     ("catch", ("success", "zone_r"), 15.0),
     ("catch", ("reward", "w_speed"), 60.0),
-    ("catch", ("fuel", "capacity"), 60.0),
+    ("catch", ("fuel", "capacity"), 80.0),
 ])
 def test_preset_literal_values(name, path, expected):
     """프리셋 리터럴을 고정한다.
@@ -203,7 +203,7 @@ def test_gust_without_sigma_raises_config_error():
 
 def test_init_y_out_of_bounds_raises_config_error():
     with pytest.raises(ConfigError, match="init.y"):
-        build_config({"init": {"y": 900.0}})
+        build_config({"init": {"y": 2000.0}})
 
 
 def test_init_vy_range_scalar_raises_config_error():
@@ -213,12 +213,12 @@ def test_init_vy_range_scalar_raises_config_error():
 
 def test_init_x_range_outside_world_bounds_raises_config_error():
     with pytest.raises(ConfigError, match="x_range"):
-        build_config({"init": {"x_range": [-400.0, 400.0]}})
+        build_config({"init": {"x_range": [-1200.0, 1200.0]}})
 
 
 def test_catch_y_arm_out_of_bounds_raises_config_error():
     with pytest.raises(ConfigError, match="catch.y_arm"):
-        build_config({"catch": {"y_arm": 900.0}})
+        build_config({"catch": {"y_arm": 2000.0}})
 
 
 def test_catch_x_tower_out_of_bounds_raises_config_error():

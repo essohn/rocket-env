@@ -23,8 +23,8 @@ OBS_DIM = 11
 # 관찰 정규화 상수. 전부 환경 고정값이며 config에서 파생하지 않는다.
 # config에서 파생하면 같은 관찰값이 라운드마다 다른 물리량을 뜻하게 되어
 # 정책이 라운드 간에 전이되지 않는다.
-POS_OBS_SCALE = 300.0
-VEL_OBS_SCALE = 50.0
+POS_OBS_SCALE = 900.0
+VEL_OBS_SCALE = 200.0
 WIND_OBS_SCALE = 20.0
 
 
