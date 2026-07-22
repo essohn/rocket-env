@@ -4337,6 +4337,185 @@ uv run python scripts/measure_baseline.py --preset landing-basic --steps 1000000
 
 ---
 
+### Task 22: 렌더링 개편 — 카메라, 포획 연출, 연기, 기체 도색
+
+**배경.** 캐치 장면을 실제로 렌더링해 보니 세 가지가 드러났다.
+
+1. **로켓이 팔에 꽂혀 보인다.** 성공 판정은 로켓 **중심**이 팔 높이를
+   통과할 때 일어나는데, 로켓은 50 m 길이라 몸통이 팔을 관통한다. 실제
+   Mechazilla 는 상단을 걸어 아래로 매단다.
+2. **화면의 85%가 빈 하늘이다.** 세계가 570 m 인데 팔은 80 m 라, 간판
+   기능인 젓가락 포획이 구석의 작은 가로선으로 표현된다.
+3. **"잡는" 표현이 없다.** 로켓이 팔 높이에 멈추고 텍스트 배너만 뜬다.
+
+렌더 테스트는 프레임의 형태(`(960,640,3) uint8`)만 검사하므로 이런 문제를
+잡지 못한다. **보고 나서야 안다.**
+
+**Files:** `rocket_env/render.py`, `tests/test_render.py`
+
+- [ ] **Step 1: 카메라 도입**
+
+`_to_px` 를 고정 변환에서 카메라 기반으로 바꾼다. 로켓과 목표가 모두 보이도록
+중심과 배율을 정하고, 프레임 간 지수 평활로 흔들림을 없앤다.
+
+```python
+MIN_SCALE = 640.0 / (WORLD_X_MAX - WORLD_X_MIN)   # 전체가 보이는 최소 배율
+MAX_SCALE = 6.0                                    # 최대 줌
+CAMERA_SMOOTHING = 0.12                            # 0에 가까울수록 부드럽다
+
+
+def _camera_target(self, state, target):
+    """로켓과 목표가 모두 여유 있게 들어오는 (중심x, 중심y, 배율)."""
+    cx = (state.x + target[0]) / 2.0
+    cy = (state.y + target[1]) / 2.0
+    span_x = abs(state.x - target[0]) + 6.0 * ROCKET_HEIGHT
+    span_y = abs(state.y - target[1]) + 6.0 * ROCKET_HEIGHT
+    scale = min(WIDTH / span_x, HEIGHT / span_y)
+    return cx, cy, min(max(scale, MIN_SCALE), MAX_SCALE)
+```
+
+`Renderer` 에 `self._cam = None` 를 두고 매 프레임 목표값으로 평활 이동한다.
+`reset()` 에서 `None` 으로 되돌려 다음 에피소드가 즉시 맞춰지게 한다.
+
+`_to_px` 는 카메라를 쓴다:
+
+```python
+def _to_px(self, x, y):
+    cx, cy, scale = self._cam
+    return (int(WIDTH / 2 + (x - cx) * scale),
+            int(HEIGHT / 2 - (y - cy) * scale))
+```
+
+지면·하늘·타워도 같은 변환을 쓰므로 자동으로 따라간다. 지면은 화면 아래로
+벗어날 수 있으니, `y=0` 의 화면 좌표를 계산해 그 아래를 지면색으로 채운다.
+
+- [ ] **Step 2: 포획 시 로켓이 팔에 매달리게**
+
+캐치 태스크에서 `outcome == SUCCESS` 인 프레임은 로켓을 실제 상태 대신
+**팔에 걸린 위치**로 그린다. 상단이 팔 바로 위에 오도록 중심을 내린다.
+
+```python
+if self.cfg["task"] == "catch" and outcome == Outcome.SUCCESS:
+    y_arm = self.cfg["catch"]["y_arm"]
+    state = replace(state, y=y_arm - ROCKET_HEIGHT / 2.0 + 4.0,
+                    theta=0.0, thrust=0.0)
+```
+
+물리 상태는 건드리지 않는다 — **그리기 직전에만** 바꾼다.
+
+- [ ] **Step 3: 팔이 닫히는 연출**
+
+평소에는 팔이 포획 창만큼 벌어져 있고, 포획 성공 프레임에서는 안쪽으로
+뻗어 로켓을 감싼다.
+
+```python
+GRIP_COLOR = (255, 180, 70)
+
+# 평소: 구조물(회색, 넓게) + 포획 창(주황, ±zone_r)
+# 포획: 창 자리에 로켓 폭까지 좁혀진 집게를 그린다
+if caught:
+    for sign in (-1, 1):
+        outer = self._to_px(x_tower + sign * arm_half, y_arm)
+        inner = self._to_px(x_tower + sign * 6.0, y_arm)
+        pygame.draw.line(self.surface, GRIP_COLOR, outer, inner, 13)
+```
+
+- [ ] **Step 4: 연기 입자**
+
+추력에 비례해 노즐에서 입자를 뿜고, 퍼지면서 옅어지게 한다.
+
+```python
+MAX_PARTICLES = 500
+PARTICLE_LIFE = 1.2          # 초
+SMOKE_COLOR = (215, 215, 225)
+```
+
+`Renderer` 에 `self._particles: list[dict]` 를 두고 매 프레임:
+
+1. **발생** — `n = int(10 * thrust / (2 * G))` 개를 노즐 위치에서. 초기 속도는
+   배기 방향(기체 아래쪽을 `phi` 만큼 꺾은 방향) 에 `40~70 m/s`, 좌우로
+   `±25%` 산포.
+2. **갱신** — `pos += vel * DT`, `vel *= 0.88` (감속), `age += DT`,
+   반경은 `2 + 14 * (age / PARTICLE_LIFE)` m 로 확대.
+3. **소멸** — `age > PARTICLE_LIFE` 이면 제거. 총 개수는 `MAX_PARTICLES` 로 제한.
+4. **그리기** — `pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)` 한 장에
+   `alpha = int(170 * (1 - age / PARTICLE_LIFE) ** 1.5)` 로 원을 그린 뒤
+   한 번에 blit. 입자는 **월드 좌표**로 저장해 카메라 변환을 받는다.
+
+궤적·로켓보다 **먼저** 그려 로켓이 연기 위에 보이게 한다.
+`reset()` 에서 입자 목록을 비운다.
+
+- [ ] **Step 5: 기체에 "YONSEI" 세로 도색**
+
+기체 길이에 맞춰 세로로 쓴다. 폰트 표면은 한 번만 만들어 캐시하고, 매 프레임
+자세각과 카메라 배율에 맞춰 회전·확대한다.
+
+```python
+def _build_livery(self) -> pygame.Surface:
+    """세로로 읽히는 기체 도색. 한 번만 만든다."""
+    font = pygame.font.SysFont("helvetica", 40, bold=True)
+    glyphs = [font.render(ch, True, (40, 60, 120)) for ch in "YONSEI"]
+    w = max(g.get_width() for g in glyphs)
+    h = sum(g.get_height() for g in glyphs)
+    surf = pygame.Surface((w, h), pygame.SRCALPHA)
+    y = 0
+    for g in glyphs:
+        surf.blit(g, ((w - g.get_width()) // 2, y))
+        y += g.get_height()
+    return surf
+```
+
+`_rocket()` 에서 본체를 그린 뒤:
+
+```python
+zoom = (ROCKET_HEIGHT * 0.55 * scale) / self._livery.get_height()
+if zoom > 0.05:
+    art = pygame.transform.rotozoom(self._livery,
+                                    -math.degrees(state.theta), zoom)
+    self.surface.blit(art, art.get_rect(
+        center=self._body_to_px(state, 0.0, 2.0)))
+```
+
+**회전 부호는 렌더링해서 눈으로 확인한다.** 화면 y 축이 뒤집혀 있고 pygame
+회전은 반시계 방향이라, 부호가 맞는지는 그려봐야 안다. 로켓이 기울었을 때
+글자가 기체와 같은 방향으로 기울면 맞다.
+
+- [ ] **Step 6: 테스트**
+
+기존 14개는 형태만 검사하므로 그대로 통과해야 한다. 다음을 추가한다.
+
+```python
+def test_camera_keeps_rocket_and_target_on_screen():
+    """카메라가 로켓과 목표를 항상 화면 안에 둔다."""
+
+
+def test_particles_are_emitted_only_under_thrust():
+    """추력 0이면 입자가 생기지 않는다."""
+
+
+def test_particles_are_cleared_on_reset():
+    """에피소드가 바뀌면 이전 연기가 남지 않는다."""
+
+
+def test_caught_rocket_is_drawn_hanging_below_the_arm():
+    """포획 프레임에서 그려지는 로켓 중심이 팔보다 아래다.
+
+    물리 상태는 바뀌지 않아야 한다 — 그리기 직전에만 바꾼다.
+    """
+```
+
+- [ ] **Step 7: 육안 확인**
+
+`scripts/record_demo.py` 로 `landing-basic` 과 `catch` 각각 한 장면씩 뽑아
+필름스트립을 만들고, 다음을 눈으로 확인한다.
+
+- 카메라가 로켓을 따라가며 접근할수록 확대되는가
+- 연기가 추력에 비례해 나오고 퍼지며 옅어지는가
+- "YONSEI" 가 기체와 같은 방향으로 기울어 읽히는가
+- 포획 프레임에서 로켓이 팔에 매달려 보이는가
+
+---
+
 ## 완료 기준
 
 - [ ] `SDL_VIDEODRIVER=dummy uv run pytest -v` 전부 통과
