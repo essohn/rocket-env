@@ -6,6 +6,7 @@
 """
 
 import os
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -14,6 +15,7 @@ os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 
 from rocket_env.config import PRESETS, build_config  # noqa: E402
 from rocket_env.env import RocketEnv  # noqa: E402
+from rocket_env.physics import G  # noqa: E402
 from rocket_env.render import HEIGHT, WIDTH, Renderer  # noqa: E402
 from rocket_env.tasks.base import sample_initial_state  # noqa: E402
 from rocket_env.types import Outcome  # noqa: E402
@@ -98,4 +100,82 @@ def test_reset_clears_the_trail():
     assert len(renderer.trail) == 5
     renderer.reset()
     assert renderer.trail == []
+    renderer.close()
+
+
+def test_camera_keeps_rocket_and_target_on_screen():
+    """카메라가 로켓과 목표를 항상 화면 안에 둔다."""
+    cfg = build_config(PRESETS["catch"])
+    renderer = Renderer(cfg, "rgb_array")
+    target = (cfg["catch"]["x_tower"], cfg["catch"]["y_arm"])
+    # 목표에서 멀리 떨어진 상태 — 고정 배율이었다면 화면 밖으로 나갔을 것.
+    state = replace(a_state(cfg), x=-120.0, y=350.0)
+
+    renderer.draw(state, target, Outcome.IN_PROGRESS)
+
+    margin = 40
+    rx, ry = renderer._to_px(state.x, state.y)
+    tx, ty = renderer._to_px(*target)
+    assert margin <= rx <= WIDTH - margin
+    assert margin <= ry <= HEIGHT - margin
+    assert margin <= tx <= WIDTH - margin
+    assert margin <= ty <= HEIGHT - margin
+    renderer.close()
+
+
+def test_particles_are_emitted_only_under_thrust():
+    """추력 0이면 입자가 생기지 않는다."""
+    cfg = build_config(PRESETS["landing-descent"])
+    renderer = Renderer(cfg, "rgb_array")
+
+    idle = replace(a_state(cfg), thrust=0.0)
+    renderer.draw(idle, (0.0, 25.0), Outcome.IN_PROGRESS)
+    assert renderer._particles == []
+
+    thrusting = replace(a_state(cfg), thrust=2.0 * G)
+    renderer.draw(thrusting, (0.0, 25.0), Outcome.IN_PROGRESS)
+    assert len(renderer._particles) > 0
+    renderer.close()
+
+
+def test_particles_are_cleared_on_reset():
+    """에피소드가 바뀌면 이전 연기가 남지 않는다."""
+    cfg = build_config(PRESETS["landing-descent"])
+    renderer = Renderer(cfg, "rgb_array")
+    thrusting = replace(a_state(cfg), thrust=2.0 * G)
+    renderer.draw(thrusting, (0.0, 25.0), Outcome.IN_PROGRESS)
+    assert len(renderer._particles) > 0
+
+    renderer.reset()
+    assert renderer._particles == []
+    renderer.close()
+
+
+def test_caught_rocket_is_drawn_hanging_below_the_arm():
+    """포획 프레임에서 그려지는 로켓 중심이 팔보다 아래다.
+
+    물리 상태는 바뀌지 않아야 한다 — 그리기 직전에만 바꾼다.
+    """
+    cfg = build_config(PRESETS["catch"])
+    renderer = Renderer(cfg, "rgb_array")
+    y_arm = cfg["catch"]["y_arm"]
+    target = (cfg["catch"]["x_tower"], y_arm)
+    state = replace(a_state(cfg), y=y_arm, theta=0.3, thrust=1.5 * G)
+
+    frame = renderer.draw(state, target, Outcome.SUCCESS)
+    assert frame.shape == (HEIGHT, WIDTH, 3)
+
+    # 원본 state는 그대로다 — frozen dataclass가 이를 강제하지만, 렌더러가
+    # 별도 사본을 그리기용으로 만든다는 계약을 명시적으로 고정해 둔다.
+    assert state.y == y_arm
+    assert state.theta == 0.3
+
+    drawn = renderer._catch_draw_state(state, Outcome.SUCCESS)
+    assert drawn is not state
+    assert drawn.y < y_arm
+    assert drawn.theta == 0.0
+    assert drawn.thrust == 0.0
+
+    # SUCCESS가 아니거나 catch 태스크가 아니면 원본을 그대로 돌려준다.
+    assert renderer._catch_draw_state(state, Outcome.IN_PROGRESS) is state
     renderer.close()
