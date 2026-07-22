@@ -42,7 +42,9 @@ ARTIFACTS_DIR = Path(__file__).resolve().parent.parent / "artifacts"
 # --- 마무리 연출 ---
 # 캐치 성공 영상은 팔에 매달린 순간 끝나버리면 "잡았다"는 느낌이 없다.
 # 마지막 상태 그대로 젓가락만 닫아가며 몇 프레임 더 그린다.
-GRIP_FRAMES = 14      # grip 0 -> 1로 닫히는 구간
+GRIP_FRAMES = 14
+# 걸림 구조가 팔에 얹힐 때까지 미끄러지는 구간. ease-out 이라 끝에서 멎는다.
+SETTLE_FRAMES = 12      # grip 0 -> 1로 닫히는 구간
 HOLD_FRAMES = 24      # 다 물고 정지해 있는 구간 (fps=20 기준 약 1.2초)
 
 
@@ -98,11 +100,18 @@ def closing_frames(env, outcome: str, is_success: bool) -> list[np.ndarray]:
 
     frames = []
     if is_catch:
+        # 1단계: 집게가 오므라든다.
         for i in range(GRIP_FRAMES):
             frames.append(renderer.draw(state, target, outcome,
-                                        grip=i / (GRIP_FRAMES - 1)))
+                                        grip=i / (GRIP_FRAMES - 1), settle=0.0))
+        # 2단계: 기체가 미끄러져 내려가 걸림 구조가 팔에 얹힌다.
+        for i in range(SETTLE_FRAMES):
+            frames.append(renderer.draw(state, target, outcome, grip=1.0,
+                                        settle=i / (SETTLE_FRAMES - 1)))
     hold_grip = 1.0 if is_catch else 0.0
-    frames.extend(renderer.draw(state, target, outcome, grip=hold_grip)
+    hold_settle = 1.0 if is_catch else 0.0
+    frames.extend(renderer.draw(state, target, outcome, grip=hold_grip,
+                                settle=hold_settle)
                   for _ in range(HOLD_FRAMES))
     return frames
 

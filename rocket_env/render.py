@@ -45,7 +45,7 @@ DEBRIS_COLOR = (250, 226, 190)
 # 차이가 없다. 구름을 월드 좌표에 고정해 두면 카메라가 내려가며 스쳐
 # 지나가서 하강 속도가 눈으로 느껴진다.
 CLOUD_COUNT = 34
-CLOUD_COLOR = (238, 242, 250)
+CLOUD_COLOR = (252, 232, 224)   # 노을빛을 받은 구름
 CLOUD_SEED = 20260722
 # 일부 구름은 카메라에 더 가깝게 둔다 — 로켓보다 앞에 그리고, 카메라
 # 중심에서의 화면 오프셋을 시차 계수만큼 부풀린다. 원경 구름만 있으면
@@ -61,11 +61,16 @@ CLOUD_FRONT_PARALLAX = 1.7
 # 부스터 중심선과 타워 간격 약 30 m(0.42배). 로켓이 50 m 이므로 각각
 # 103 m / 28 m / 21 m 가 된다. 예전 값(이격 55 m, 가로보 총 100 m)은 팔이
 # 로켓 길이의 2배로, 실물의 3.5배였다.
+TRUSS_HALF_W = 4.5        # 트러스 폭의 절반 (m)
+TRUSS_BAY = 9.0           # 브레이스 한 칸 길이 (m)
 TOWER_OFFSET = 21.0
 TOWER_HEIGHT_FACTOR = 1.3
 
-SKY_TOP = (12, 18, 40)
-SKY_BOTTOM = (70, 96, 140)
+# 석양. 천정의 짙은 보라에서 지평선의 주황까지 3단으로 섞는다 —
+# 2단으로는 노을 특유의 붉은 중간대가 나오지 않는다.
+SKY_TOP = (28, 26, 66)
+SKY_MID = (188, 88, 84)
+SKY_BOTTOM = (255, 178, 98)
 GROUND_COLOR = (38, 40, 44)
 PAD_COLOR = (200, 190, 90)
 TOWER_COLOR = (150, 155, 165)
@@ -81,6 +86,12 @@ ARM_DEPTH = 5.0           # 앞뒤 팔의 화면 어긋남 (m)
 GRIP_APPROACH_RANGE = 45.0
 GRIP_ALIGN_RANGE = 3.0    # 수평 정렬이 이 배수 안이어야 닫기 시작한다
 BODY_COLOR = (232, 234, 238)
+BODY_HALF_W = 4.2          # 원통 반지름 (m)
+# 상단 걸림 구조(리프트 포인트). 젓가락이 이 돌기에 걸려 기체를 든다.
+PIN_Y = 16.0               # 기체 좌표에서의 높이
+PIN_OUT = 3.4              # 몸통 밖으로 튀어나온 길이
+PIN_THICK = 1.6
+PIN_COLOR = (176, 182, 194)
 FIN_COLOR = (120, 125, 135)
 TRAIL_COLOR = (90, 160, 220)
 HUD_COLOR = (225, 230, 240)
@@ -136,14 +147,14 @@ class Renderer:
         self._particles = []
 
     def draw(self, state: State, target: tuple[float, float],
-             outcome: str, grip: float | None = None):
+             outcome: str, grip: float | None = None, settle: float = 0.0):
         """한 프레임을 그린다.
 
         `grip`은 순전히 연출용 상태다(0=벌어짐, 1=다 묾) — 물리에는
         전혀 관여하지 않는다. 기본값 0.0이라 기존 호출부(테스트 등)는
         그대로 동작한다.
         """
-        draw_state = self._catch_draw_state(state, outcome)
+        draw_state = self._catch_draw_state(state, outcome, settle)
         if grip is None:
             # 접근할수록 오므라든다. 잡히면 완전히 문다.
             grip = (1.0 if outcome == Outcome.SUCCESS
@@ -188,7 +199,8 @@ class Renderer:
 
     # --- 포획 연출 ---
 
-    def _catch_draw_state(self, state: State, outcome: str) -> State:
+    def _catch_draw_state(self, state: State, outcome: str,
+                          settle: float = 0.0) -> State:
         """포획 성공 프레임에서 그리기 전용으로 쓸 상태를 만든다.
 
         실제 판정은 로켓 중심이 팔 높이를 지나는 순간 일어나지만, 로켓은
@@ -201,11 +213,13 @@ class Renderer:
         """
         if self.cfg["task"] != "catch" or outcome != Outcome.SUCCESS:
             return state
-        # 위치는 건드리지 않는다. 예전에는 매달린 자리로 내려 그렸는데,
-        # 판정이 로켓 중심이 팔 높이를 지날 때 일어나므로 한 프레임 만에
-        # 20 m 넘게 순간이동한 것처럼 보였다. 관통해 보이는 문제는 앞/뒤
-        # 팔을 나눠 로켓을 그 사이에 끼워 그리는 것으로 푼다.
-        return replace(state, thrust=0.0)
+        # 순간이동은 하지 않는다. 대신 settle(0~1)에 따라 걸림 구조가
+        # 팔에 얹힐 때까지 PIN_Y 만큼 부드럽게 미끄러져 내려간다. 판정은
+        # 로켓 중심이 팔 높이를 지날 때 일어나므로, 그 지점에서 pin이
+        # 팔에 닿으려면 중심이 PIN_Y 만큼 더 내려가야 한다.
+        # ease-out(1-(1-t)^3)이라 처음엔 빠르게 미끄러지고 끝에서 탁 멎는다.
+        eased = 1.0 - (1.0 - min(max(settle, 0.0), 1.0)) ** 3
+        return replace(state, y=state.y - PIN_Y * eased, thrust=0.0)
 
     # --- 카메라 ---
 
@@ -253,8 +267,13 @@ class Renderer:
         sky = pygame.Surface((WIDTH, HEIGHT))
         for row in range(HEIGHT):
             t = row / HEIGHT
-            color = tuple(int(SKY_TOP[i] + (SKY_BOTTOM[i] - SKY_TOP[i]) * t)
-                          for i in range(3))
+            if t < 0.55:
+                u = t / 0.55
+                a, b = SKY_TOP, SKY_MID
+            else:
+                u = (t - 0.55) / 0.45
+                a, b = SKY_MID, SKY_BOTTOM
+            color = tuple(int(a[i] + (b[i] - a[i]) * u) for i in range(3))
             pygame.draw.line(sky, color, (0, row), (WIDTH, row))
         return sky
 
@@ -275,7 +294,7 @@ class Renderer:
                 # 알파가 낮으면 어두운 남색 하늘 위에서 흰 구름이 탁한 회색
                 # 덩어리가 되어 먹구름처럼 읽힌다. 충분히 올려야 의도한
                 # 밝은 색이 나온다.
-                "alpha": int(rng.integers(150, 215)),
+                "alpha": int(rng.integers(70, 125)),
                 # 앞쪽 구름은 더 크고 진하게 — 가까이 있다는 인상을 준다
                 "front": bool(rng.random() < CLOUD_FRONT_RATIO),
                 # 뭉게구름처럼 보이도록 원을 몇 개 겹친다
@@ -348,22 +367,8 @@ class Renderer:
         mast_x = x_tower - TOWER_OFFSET
         mast_top = y_arm * TOWER_HEIGHT_FACTOR
 
-        pygame.draw.line(self.surface, TOWER_COLOR,
-                         self._to_px(mast_x, 0.0), self._to_px(mast_x, mast_top),
-                         self._scaled_width(8.0))
-        # 격자 살대 — 기둥 하나만 그리면 마스트가 아니라 깃대처럼 보인다.
-        for frac in (0.2, 0.45, 0.7, 0.92):
-            y = mast_top * frac
-            pygame.draw.line(self.surface, TOWER_COLOR,
-                             self._to_px(mast_x - 7.0, y),
-                             self._to_px(mast_x + 7.0, y),
-                             self._scaled_width(3.0, min_px=1))
-
-        # 가로보(cantilever): 마스트에서 포획 지점 너머까지 옆으로 뻗는다.
-        pygame.draw.line(self.surface, TOWER_COLOR,
-                         self._to_px(mast_x, y_arm),
-                         self._to_px(x_tower + arm_half, y_arm),
-                         self._scaled_width(7.0))
+        self._truss_mast(mast_x, mast_top)
+        self._truss_beam(mast_x, x_tower + arm_half, y_arm)
 
         # 실제 포획 판정 범위(±zone_r). 이걸 따로 그리지 않으면 학생은
         # 팔 안쪽으로 잘 지나간 것처럼 보이는데 MISSED 가 뜨는 이유를
@@ -377,6 +382,42 @@ class Renderer:
         # 로켓이 두 팔 사이에 물린 것처럼 보인다 — 한 겹으로 그리면
         # 팔이 기체를 관통한 모습이 된다.
         self._draw_jaws(x_tower, y_arm, window_half, grip, front=False)
+
+    def _truss_mast(self, mast_x: float, top: float) -> None:
+        """수직 트러스. 기둥 하나로 그리면 깃대처럼 보이고, 실제 발사탑은
+        두 줄기 사이를 X 브레이스로 엮은 격자 구조다."""
+        rail = self._scaled_width(4.0, min_px=2)
+        brace = self._scaled_width(2.0, min_px=1)
+        left, right = mast_x - TRUSS_HALF_W, mast_x + TRUSS_HALF_W
+        for rx in (left, right):
+            pygame.draw.line(self.surface, TOWER_COLOR,
+                             self._to_px(rx, 0.0), self._to_px(rx, top), rail)
+        bays = max(6, int(top / TRUSS_BAY))
+        for i in range(bays):
+            y0 = top * i / bays
+            y1 = top * (i + 1) / bays
+            pygame.draw.line(self.surface, TOWER_COLOR,
+                             self._to_px(left, y1), self._to_px(right, y1), brace)
+            pygame.draw.line(self.surface, TOWER_COLOR,
+                             self._to_px(left, y0), self._to_px(right, y1), brace)
+            pygame.draw.line(self.surface, TOWER_COLOR,
+                             self._to_px(right, y0), self._to_px(left, y1), brace)
+
+    def _truss_beam(self, x0: float, x1: float, y: float) -> None:
+        """수평 트러스 가로보. 위아래 두 줄기와 지그재그 브레이스."""
+        rail = self._scaled_width(3.5, min_px=2)
+        brace = self._scaled_width(2.0, min_px=1)
+        top, bot = y + TRUSS_HALF_W * 0.8, y - TRUSS_HALF_W * 0.8
+        for yy in (top, bot):
+            pygame.draw.line(self.surface, TOWER_COLOR,
+                             self._to_px(x0, yy), self._to_px(x1, yy), rail)
+        bays = max(3, int(abs(x1 - x0) / TRUSS_BAY))
+        for i in range(bays):
+            a = x0 + (x1 - x0) * i / bays
+            b = x0 + (x1 - x0) * (i + 1) / bays
+            lo, hi = (bot, top) if i % 2 == 0 else (top, bot)
+            pygame.draw.line(self.surface, TOWER_COLOR,
+                             self._to_px(a, lo), self._to_px(b, hi), brace)
 
     def _draw_jaws(self, x_tower: float, y_arm: float, window_half: float,
                    grip: float, *, front: bool) -> None:
@@ -516,20 +557,45 @@ class Renderer:
     # --- 로켓 ---
 
     def _rocket(self, state: State) -> None:
-        half = ROCKET_HEIGHT / 2.0
-        body = [(-4.0, -half), (4.0, -half), (4.0, half - 10.0),
-                (0.0, half), (-4.0, half - 10.0)]
-        pygame.draw.polygon(
-            self.surface, BODY_COLOR,
-            [self._body_to_px(state, bx, by) for bx, by in body])
+        """Starship 부스터를 흉내낸 원통형 기체.
 
-        fins = [(-4.0, -half + 4.0), (-11.0, -half - 3.0), (-4.0, -half + 12.0)]
-        pygame.draw.polygon(
-            self.surface, FIN_COLOR,
-            [self._body_to_px(state, bx, by) for bx, by in fins])
-        pygame.draw.polygon(
-            self.surface, FIN_COLOR,
-            [self._body_to_px(state, -bx, by) for bx, by in fins])
+        뾰족한 노즈콘이 아니라 위가 평평한 원통이고, 상단 옆으로 걸림
+        구조(리프트 포인트)가 튀어나와 있다 — 젓가락이 그 돌기에 걸려
+        기체를 든다. 판정 자체는 물리가 하지만, 어디에 걸리는지가 보여야
+        학생이 포획을 이해한다.
+        """
+        half = ROCKET_HEIGHT / 2.0
+        poly = self._body_to_px
+
+        # 엔진 스커트: 아래가 살짝 넓다
+        skirt = [(-BODY_HALF_W - 1.2, -half), (BODY_HALF_W + 1.2, -half),
+                 (BODY_HALF_W, -half + 5.0), (-BODY_HALF_W, -half + 5.0)]
+        pygame.draw.polygon(self.surface, FIN_COLOR,
+                            [poly(state, bx, by) for bx, by in skirt])
+
+        # 원통 몸통. 꼭대기는 평평하되 모서리만 살짝 깎는다.
+        body = [(-BODY_HALF_W, -half + 4.0), (BODY_HALF_W, -half + 4.0),
+                (BODY_HALF_W, half - 1.5), (BODY_HALF_W - 1.4, half),
+                (-BODY_HALF_W + 1.4, half), (-BODY_HALF_W, half - 1.5)]
+        pygame.draw.polygon(self.surface, BODY_COLOR,
+                            [poly(state, bx, by) for bx, by in body])
+
+        # 걸림 구조(리프트 포인트) — 젓가락이 여기에 걸린다
+        for sign in (-1, 1):
+            pin = [(sign * BODY_HALF_W, PIN_Y - PIN_THICK),
+                   (sign * (BODY_HALF_W + PIN_OUT), PIN_Y - PIN_THICK),
+                   (sign * (BODY_HALF_W + PIN_OUT), PIN_Y + PIN_THICK),
+                   (sign * BODY_HALF_W, PIN_Y + PIN_THICK)]
+            pygame.draw.polygon(self.surface, PIN_COLOR,
+                                [poly(state, bx, by) for bx, by in pin])
+
+        # 그리드핀: 실물처럼 상단 근처에 단다
+        fins = [(BODY_HALF_W, PIN_Y - 9.0), (BODY_HALF_W + 5.5, PIN_Y - 12.5),
+                (BODY_HALF_W, PIN_Y - 3.0)]
+        for sign in (-1, 1):
+            pygame.draw.polygon(
+                self.surface, FIN_COLOR,
+                [poly(state, sign * bx, by) for bx, by in fins])
 
         self._paint_livery(state)
         self._flame(state)
@@ -590,6 +656,10 @@ class Renderer:
             f"wind  {state.wind_x:7.1f} m/s",
             f"step  {state.step:5d} / {self.cfg['max_steps']}",
         ]
+        # 석양 배경은 밝아서 흰 글씨가 묻힌다. 반투명 판을 먼저 깐다.
+        panel = pygame.Surface((330, 20 + len(lines) * 19), pygame.SRCALPHA)
+        panel.fill((10, 12, 24, 150))
+        self.surface.blit(panel, (6, 6))
         for i, line in enumerate(lines):
             self.surface.blit(
                 self.font.render(line, True, HUD_COLOR), (12, 12 + i * 19))
