@@ -71,7 +71,15 @@ PAD_COLOR = (200, 190, 90)
 TOWER_COLOR = (150, 155, 165)
 ARM_COLOR = (230, 120, 60)
 JAW_COLOR = (255, 175, 60)
+JAW_BACK_COLOR = (196, 128, 42)   # 뒤쪽 팔 — 그늘져 어둡게
 JAW_CLOSED_HALF = 5.0     # 다 물었을 때 턱 안쪽 간격 (m)
+# 카메라가 약간 위에서 내려다본다고 가정한다. 뒤쪽 팔은 화면에서 위로,
+# 앞쪽 팔은 아래로 어긋나게 그려 둘이 구분되고, 로켓이 그 사이에 물린다.
+ARM_DEPTH = 5.0           # 앞뒤 팔의 화면 어긋남 (m)
+# 로켓이 이만큼 위로 접근하면 집게가 오므라들기 시작한다. 잡히는 순간에만
+# 닫히면 동작이 보이지 않는다.
+GRIP_APPROACH_RANGE = 45.0
+GRIP_ALIGN_RANGE = 3.0    # 수평 정렬이 이 배수 안이어야 닫기 시작한다
 BODY_COLOR = (232, 234, 238)
 FIN_COLOR = (120, 125, 135)
 TRAIL_COLOR = (90, 160, 220)
@@ -128,7 +136,7 @@ class Renderer:
         self._particles = []
 
     def draw(self, state: State, target: tuple[float, float],
-             outcome: str, grip: float = 0.0):
+             outcome: str, grip: float | None = None):
         """한 프레임을 그린다.
 
         `grip`은 순전히 연출용 상태다(0=벌어짐, 1=다 묾) — 물리에는
@@ -136,6 +144,10 @@ class Renderer:
         그대로 동작한다.
         """
         draw_state = self._catch_draw_state(state, outcome)
+        if grip is None:
+            # 접근할수록 오므라든다. 잡히면 완전히 문다.
+            grip = (1.0 if outcome == Outcome.SUCCESS
+                    else self._approach_grip(draw_state, target))
 
         self._update_camera(draw_state, target)
         self._update_particles(draw_state)
@@ -149,6 +161,7 @@ class Renderer:
         self.trail.append(self._to_px(draw_state.x, draw_state.y))
         self._trail()
         self._rocket(draw_state)
+        self._front_arm(target, grip)
         # 전경 구름은 로켓보다 카메라에 가까우므로 기체 위에 덮인다.
         # 가끔 로켓을 스쳐 지나가며 깊이감을 만든다.
         self._draw_clouds(front=True)
@@ -188,9 +201,11 @@ class Renderer:
         """
         if self.cfg["task"] != "catch" or outcome != Outcome.SUCCESS:
             return state
-        y_arm = self.cfg["catch"]["y_arm"]
-        return replace(state, y=y_arm - ROCKET_HEIGHT / 2.0 + 4.0,
-                       theta=0.0, thrust=0.0)
+        # 위치는 건드리지 않는다. 예전에는 매달린 자리로 내려 그렸는데,
+        # 판정이 로켓 중심이 팔 높이를 지날 때 일어나므로 한 프레임 만에
+        # 20 m 넘게 순간이동한 것처럼 보였다. 관통해 보이는 문제는 앞/뒤
+        # 팔을 나눠 로켓을 그 사이에 끼워 그리는 것으로 푼다.
+        return replace(state, thrust=0.0)
 
     # --- 카메라 ---
 
@@ -358,19 +373,34 @@ class Renderer:
                          self._to_px(x_tower + window_half, y_arm),
                          self._scaled_width(11.0))
 
-        # 젓가락은 가로보 위에 그려야 구조물에 달린 것처럼 보인다 — 가로보를
-        # 먼저 그리고 그 위에 덧그린다.
-        self._draw_jaws(x_tower, y_arm, window_half, grip)
+        # 뒤쪽 팔만 여기서 그린다. 앞쪽 팔은 로켓을 그린 뒤에 덧그려야
+        # 로켓이 두 팔 사이에 물린 것처럼 보인다 — 한 겹으로 그리면
+        # 팔이 기체를 관통한 모습이 된다.
+        self._draw_jaws(x_tower, y_arm, window_half, grip, front=False)
 
     def _draw_jaws(self, x_tower: float, y_arm: float, window_half: float,
-                   grip: float) -> None:
-        """포획 창 자리에 달린 두 턱. grip 0(벌어짐) -> 1(다 묾)으로 오므라든다."""
+                   grip: float, *, front: bool) -> None:
+        """포획 창 자리에 달린 턱 한 쌍. grip 0(벌어짐) -> 1(다 묾).
+
+        카메라가 약간 위에서 내려다본다고 보고, 뒤쪽 팔은 화면에서 위로,
+        앞쪽 팔은 아래로 어긋나게 그린다. 뒤쪽은 그늘져 어둡고 얇다.
+        """
         inner = window_half + (JAW_CLOSED_HALF - window_half) * grip
-        width = self._scaled_width(9.0, min_px=3)
+        depth = ARM_DEPTH if front else -ARM_DEPTH
+        color = JAW_COLOR if front else JAW_BACK_COLOR
+        width = self._scaled_width(9.0 if front else 7.0, min_px=3)
         for sign in (-1, 1):
-            root = self._to_px(x_tower + sign * (window_half + 12.0), y_arm)
-            tip = self._to_px(x_tower + sign * inner, y_arm)
-            pygame.draw.line(self.surface, JAW_COLOR, root, tip, width)
+            root = self._to_px(x_tower + sign * (window_half + 12.0),
+                               y_arm - depth)
+            tip = self._to_px(x_tower + sign * inner, y_arm - depth)
+            pygame.draw.line(self.surface, color, root, tip, width)
+
+    def _front_arm(self, target: tuple[float, float], grip: float) -> None:
+        """앞쪽 팔. 로켓을 그린 뒤 호출해 기체 위에 덮는다."""
+        if self.cfg["task"] != "catch":
+            return
+        x_tower, y_arm, _, window_half = self._catch_geometry(target)
+        self._draw_jaws(x_tower, y_arm, window_half, grip, front=True)
 
     def _scaled_width(self, base_px: float, min_px: int = 2) -> int:
         """카메라 배율에 맞춰 선 굵기를 조정한다.
@@ -382,6 +412,21 @@ class Renderer:
         """
         _, _, scale = self._cam
         return max(min_px, int(round(base_px * scale / MIN_SCALE)))
+
+    def _approach_grip(self, state: State, target: tuple[float, float]) -> float:
+        """로켓이 팔에 다가온 정도(0~1). 집게가 오므라드는 양이다.
+
+        수직으로 가까울수록, 그리고 수평으로 대충 정렬돼 있을 때만 닫는다 —
+        멀찍이 빗나가는 로켓에도 집게가 닫히면 어색하다.
+        """
+        if self.cfg["task"] != "catch":
+            return 0.0
+        x_tower, y_arm = target
+        window_half = self.cfg["success"]["zone_r"]
+        if abs(state.x - x_tower) > window_half * GRIP_ALIGN_RANGE:
+            return 0.0
+        above = state.y - y_arm
+        return min(max(1.0 - above / GRIP_APPROACH_RANGE, 0.0), 1.0)
 
     def _catch_geometry(self, target: tuple[float, float]):
         """타워 x, 팔 높이, 팔 반폭, 실제 포획 창 반폭을 돌려준다.

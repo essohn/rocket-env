@@ -153,10 +153,13 @@ def test_particles_are_cleared_on_reset():
     renderer.close()
 
 
-def test_caught_rocket_is_drawn_hanging_below_the_arm():
-    """포획 프레임에서 그려지는 로켓 중심이 팔보다 아래다.
+def test_caught_rocket_is_not_teleported():
+    """포획 프레임에서 로켓 위치가 그대로여야 한다.
 
-    물리 상태는 바뀌지 않아야 한다 — 그리기 직전에만 바꾼다.
+    예전에는 매달린 자리로 내려 그렸는데, 판정이 로켓 중심이 팔 높이를
+    지날 때 일어나므로 한 프레임 만에 20 m 넘게 순간이동한 것처럼 보였다.
+    관통해 보이는 문제는 앞/뒤 팔을 나눠 로켓을 그 사이에 끼우는 것으로
+    푼다 — 위치를 옮겨서가 아니다.
     """
     cfg = build_config(PRESETS["catch"])
     renderer = Renderer(cfg, "rgb_array")
@@ -167,19 +170,41 @@ def test_caught_rocket_is_drawn_hanging_below_the_arm():
     frame = renderer.draw(state, target, Outcome.SUCCESS)
     assert frame.shape == (HEIGHT, WIDTH, 3)
 
-    # 원본 state는 그대로다 — frozen dataclass가 이를 강제하지만, 렌더러가
-    # 별도 사본을 그리기용으로 만든다는 계약을 명시적으로 고정해 둔다.
-    assert state.y == y_arm
-    assert state.theta == 0.3
-
     drawn = renderer._catch_draw_state(state, Outcome.SUCCESS)
-    assert drawn is not state
-    assert drawn.y < y_arm
-    assert drawn.theta == 0.0
-    assert drawn.thrust == 0.0
+    assert drawn.y == state.y          # 점프 없음
+    assert drawn.theta == state.theta  # 자세도 그대로
+    assert drawn.thrust == 0.0         # 엔진만 꺼진다
 
-    # SUCCESS가 아니거나 catch 태스크가 아니면 원본을 그대로 돌려준다.
+    # 원본은 건드리지 않는다 — env.py 가 살아있는 상태를 넘기기 때문이다.
+    assert state.thrust == 1.5 * G
     assert renderer._catch_draw_state(state, Outcome.IN_PROGRESS) is state
+    renderer.close()
+
+
+def test_jaws_close_as_the_rocket_approaches():
+    """집게는 잡히는 순간이 아니라 다가오는 동안 점점 오므라든다.
+
+    포획 시점에만 닫히면 동작이 한 프레임에 끝나 보이지 않는다.
+    """
+    cfg = build_config(PRESETS["catch"])
+    renderer = Renderer(cfg, "rgb_array")
+    y_arm = cfg["catch"]["y_arm"]
+    target = (cfg["catch"]["x_tower"], y_arm)
+
+    far = renderer._approach_grip(replace(a_state(cfg), x=0.0, y=y_arm + 200.0),
+                                  target)
+    near = renderer._approach_grip(replace(a_state(cfg), x=0.0, y=y_arm + 20.0),
+                                   target)
+    arrived = renderer._approach_grip(replace(a_state(cfg), x=0.0, y=y_arm),
+                                      target)
+    assert far == 0.0
+    assert 0.0 < near < 1.0
+    assert arrived == 1.0
+
+    # 수평으로 크게 빗나간 로켓에는 닫히지 않는다 — 어색하기 때문이다.
+    off = renderer._approach_grip(
+        replace(a_state(cfg), x=cfg["success"]["zone_r"] * 10.0, y=y_arm), target)
+    assert off == 0.0
     renderer.close()
 
 
