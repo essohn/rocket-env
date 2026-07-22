@@ -1,0 +1,359 @@
+"""환경 설정: 기본값, 태스크 프로파일, 라운드 프리셋, 검증.
+
+설계 원칙 — 학생은 **학습용** 설정을 자유롭게 바꿀 수 있고, 채점은 **평가용**
+설정으로 이뤄진다. 이 어긋남 자체가 수업의 핵심 교보재다: 내가 최적화하는 것과
+내가 평가받는 것은 다르다.
+
+다만 물리 상수처럼 바꿔봐야 다른 문제를 푸는 셈인 키는 잠근다.
+"""
+
+import copy
+from typing import Any
+
+from rocket_env.physics import ROCKET_HEIGHT, WORLD_X_MAX, WORLD_X_MIN, WORLD_Y_MAX
+
+# 물리·관찰·행동 상수는 config로 노출하지 않는다.
+LOCKED_KEYS = frozenset({
+    "dt", "g", "H", "rocket_height", "observation", "action",
+})
+
+# 평가와 다르면 경고만 내는 키 경로 (학습 시 바꿔볼 가치는 있다).
+WARN_PATHS = ("success", "init", "catch")
+
+DEFAULT_CONFIG: dict[str, Any] = {
+    "task": "landing",
+    "max_steps": 800,
+    # seed는 환경이 소비하지 않는다. 라운드 시스템이 reset(seed=...)에 쓰는
+    # 호출자 측 메타데이터다. 환경이 이 값을 읽으면 학습 시 모든 에피소드가
+    # 동일해지는 버그가 생긴다.
+    "seed": None,
+
+    "wind": {
+        "mode": "constant",   # "none" | "constant" | "gust"
+        "max_speed": 8.0,
+        "ou_theta": 0.0,
+        "ou_sigma": 0.0,
+    },
+
+    "fuel": {"capacity": 120.0},   # None이면 무한
+
+    "init": {
+        "y": 450.0,
+        "vy_range": [-60.0, -50.0],
+        "x_range": [-150.0, 150.0],
+        "theta_range_deg": [-45.0, 45.0],
+        # 초기 각속도의 크기 범위(deg/s). 부호는 매 에피소드 무작위.
+        # 항상 성공 임계(omega_max_deg)보다 크게 잡는다 — 노즐을 쓰지 않는
+        # 정책은 alpha ≡ 0 이라 ω 를 영원히 못 줄이므로, 이 한 줄이
+        # "관찰을 읽지 않는 개루프 정책"을 모든 라운드에서 0%로 만든다.
+        "omega_abs_range_deg": [12.0, 20.0],
+    },
+
+    "success": {
+        "v_max": 15.0,
+        "theta_max_deg": 10.0,
+        "omega_max_deg": 10.0,
+        "zone_r": 50.0,
+    },
+
+    "catch": {"x_tower": 0.0, "y_arm": 80.0},
+
+    "reward": {
+        "success_base": 100.0,
+        "w_speed": 40.0,
+        "v_ref": 5.0,
+        "w_position": 30.0,
+        "w_attitude": 20.0,
+        "w_fuel": 30.0,
+        "w_time": 30.0,
+        "failure_max": 40.0,
+        # 1.0이어야 shaping 총합이 정확히 Φ(s_T) - Φ(s_0)로 접힌다.
+        # γ<1이면 에피소드가 길수록 shaping 총합이 커지는 편향이 생긴다.
+        "shaping_gamma": 1.0,
+        # 총합이 정확히 0이므로 점수에는 영향이 없다. 값이 클수록 스텝당
+        # 학습 신호가 강해진다. 예전 값(1.0/0.5/0.5)에서는 shaping 이
+        # 리턴의 1% 미만이라 탐색을 전혀 안내하지 못했다.
+        "shaping_w_dist": 20.0,
+        "shaping_w_attitude": 10.0,
+        "shaping_w_speed": 10.0,
+        "fuel_penalty": 0.05,
+    },
+}
+
+# task="catch"일 때 갈아끼우는 프로파일. 사용자가 명시한 값은 덮지 않는다.
+CATCH_OVERRIDES: dict[str, Any] = {
+    "success": {
+        "v_max": 5.0,
+        "theta_max_deg": 5.0,
+        "omega_max_deg": 5.0,
+        "zone_r": 6.0,
+    },
+    "reward": {
+        "w_speed": 60.0,
+        "v_ref": 2.0,
+        "w_fuel": 20.0,
+        "w_time": 20.0,
+    },
+}
+
+PRESETS: dict[str, dict[str, Any]] = {
+    # landing 다섯 라운드는 난이도 축을 하나씩만 추가한다. 여러 축을
+    # 동시에 올리면 학생은 무엇이 새로 어려워졌는지 모르고, 조교는 어디서
+    # 막히는지 진단할 수 없다. catch는 이 규칙 밖이다 — 아래 주석 참고.
+    "landing-basic": {
+        "task": "landing",
+        "wind": {"mode": "none", "max_speed": 0.0},
+        "fuel": {"capacity": None},
+        "init": {"y": 200.0, "vy_range": [-20.0, -20.0],
+                 "x_range": [-80.0, 80.0], "theta_range_deg": [-5.0, 5.0],
+                 "omega_abs_range_deg": [12.0, 20.0]},
+    },
+    # + 자세 보정: 초기 기울기가 성공 임계(±10°)를 벗어난다.
+    "landing-attitude": {
+        "task": "landing",
+        "wind": {"mode": "none", "max_speed": 0.0},
+        "fuel": {"capacity": None},
+        "init": {"y": 200.0, "vy_range": [-20.0, -20.0],
+                 "x_range": [-50.0, 50.0], "theta_range_deg": [-30.0, 30.0]},
+    },
+    # + 고속 진입: 고도와 초기 하강속도가 올라간다.
+    "landing-descent": {
+        "task": "landing",
+        "wind": {"mode": "none", "max_speed": 0.0},
+        "fuel": {"capacity": None},
+        "init": {"y": 450.0, "vy_range": [-50.0, -40.0],
+                 "x_range": [-50.0, 50.0], "theta_range_deg": [-30.0, 30.0]},
+    },
+    # + 외란: 에피소드 내내 일정한 옆바람.
+    "landing-wind": {
+        "task": "landing",
+        "wind": {"mode": "constant", "max_speed": 8.0},
+        "fuel": {"capacity": None},
+        "init": {"y": 450.0, "vy_range": [-50.0, -40.0],
+                 "x_range": [-50.0, 50.0], "theta_range_deg": [-30.0, 30.0]},
+    },
+    # + 불확실성과 자원: 돌풍이 되고 연료가 유한해진다. 이 라운드만 축이
+    #   둘인데, 둘 다 "예측할 수 없는 조건에서 버티기"라는 한 주제다.
+    "landing-gust": {
+        "task": "landing",
+        "wind": {"mode": "gust", "max_speed": 12.0,
+                 "ou_theta": 0.15, "ou_sigma": 3.0},
+        # 최대 소모는 fuel_cost(2g) * max_steps = 0.1 * 800 = 80 이다.
+        # 120 이면 어떤 정책도 연료가 바닥날 수 없어 "유한 연료" 축이
+        # 이름뿐이었다. 55는 그 상한보다 낮아 소모 관리가 실제로 필요하다.
+        "fuel": {"capacity": 55.0},
+        "init": {"y": 450.0, "vy_range": [-50.0, -40.0],
+                 "x_range": [-50.0, 50.0], "theta_range_deg": [-30.0, 30.0]},
+    },
+    # + 정밀 포획: 지면 대신 발사탑 팔 높이를 통과해야 한다. 다른 다섯
+    # 라운드와 달리 이 라운드는 축을 하나만 얹는 게 아니라 아예 다른
+    # 과제다 — gust를 빼고 바람을 줄이는 대신 성공 임계값 넷(속도·위치·
+    # 자세·각속도)을 모두 조인다.
+    "catch": {
+        "task": "catch",
+        "wind": {"mode": "constant", "max_speed": 5.0},
+        # 60은 fuel_cost(2g) * max_steps = 80 보다 낮아 소모 관리가 필요하다.
+        "fuel": {"capacity": 60.0},
+        "init": {"y": 450.0, "vy_range": [-50.0, -40.0],
+                 "x_range": [-50.0, 50.0], "theta_range_deg": [-30.0, 30.0]},
+    },
+}
+
+
+class ConfigError(ValueError):
+    """설정이 잘못되었거나 잠긴 키를 건드렸을 때."""
+
+
+def _deep_merge(base: dict, overlay: dict) -> dict:
+    """overlay를 base 위에 재귀적으로 얹는다. base는 변경하지 않는다."""
+    out = copy.deepcopy(base)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge(out[key], value)
+        else:
+            out[key] = copy.deepcopy(value)
+    return out
+
+
+def _reject_unknown_keys(user: dict, schema: dict, path: str = "") -> None:
+    """스키마에 없는 키를 거부한다.
+
+    오타 난 키가 조용히 무시되는 것이 가장 나쁜 실패 모드다.
+    `{"fuel": {"capacty": 50.0}}` 처럼 한 글자만 틀려도 병합은 성공하고,
+    의도한 설정이 전혀 적용되지 않은 채로 몇 시간짜리 학습이 끝난다.
+    라운드 설정을 쓰는 조교도 학생도 이 실수는 즉시 알아야 한다.
+    """
+    for key, value in user.items():
+        full = f"{path}{key}"
+        if key not in schema:
+            raise ConfigError(
+                f"알 수 없는 설정 키: {full!r}. "
+                f"사용 가능한 키: {sorted(schema)}"
+            )
+        expected = schema[key]
+        if _kind(expected) != "none" and _kind(value) not in (_kind(expected), "none"):
+            raise ConfigError(
+                f"{full!r} 의 형태가 스키마와 다릅니다: "
+                f"{_kind(value)} (스키마는 {_kind(expected)})")
+        if isinstance(value, dict) and isinstance(schema[key], dict):
+            _reject_unknown_keys(value, schema[key], path=f"{full}.")
+
+
+def _kind(value) -> str:
+    if isinstance(value, dict):
+        return "dict"
+    if isinstance(value, (list, tuple)):
+        return "list"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, str):
+        return "str"
+    return "none"
+
+
+def build_config(user_config: dict | None) -> dict:
+    """기본값 → 태스크 프로파일 → 사용자 설정 순으로 병합한 완전한 설정."""
+    user = user_config or {}
+
+    locked = LOCKED_KEYS & set(user)
+    if locked:
+        raise ConfigError(
+            f"다음 키는 환경 상수라 변경할 수 없습니다: {sorted(locked)}"
+        )
+
+    _reject_unknown_keys(user, DEFAULT_CONFIG)
+
+    task = user.get("task", DEFAULT_CONFIG["task"])
+    if task not in ("landing", "catch"):
+        raise ConfigError(f"task는 'landing' 또는 'catch'여야 합니다: {task!r}")
+
+    cfg = copy.deepcopy(DEFAULT_CONFIG)
+    if task == "catch":
+        cfg = _deep_merge(cfg, CATCH_OVERRIDES)
+    cfg = _deep_merge(cfg, user)
+
+    _normalize_wind(cfg, user.get("wind", {}))
+    _validate_ranges(cfg)
+    return cfg
+
+
+def _normalize_wind(cfg: dict, user_wind: dict) -> None:
+    """mode 가 실제 동작을 결정하도록 동반 값을 맞춘다.
+
+    WindProcess 는 mode 를 읽지 않고 max_speed/ou_theta/ou_sigma 만 본다.
+    사용자가 명시하지 않은 값(기본값 상속)은 조용히 채워 넣지만, 사용자가
+    명시적으로 지정한 값이 mode 와 모순되면 조용히 0으로 덮지 않고
+    ConfigError 를 낸다 — 정당한 키를 말없이 버리는 것은 `_reject_unknown_keys`
+    가 막으려던 바로 그 실패 모드다.
+    """
+    wind = cfg["wind"]
+    if wind["mode"] == "none":
+        for key in ("max_speed", "ou_theta", "ou_sigma"):
+            if key in user_wind and user_wind[key] != 0.0:
+                raise ConfigError(
+                    f"wind.mode='none' 인데 wind.{key}={user_wind[key]!r} 로 "
+                    "모순됩니다. mode를 바꾸거나 값을 0으로 하세요.")
+        wind["max_speed"] = 0.0
+        wind["ou_theta"] = 0.0
+        wind["ou_sigma"] = 0.0
+    elif wind["mode"] == "constant":
+        for key in ("ou_theta", "ou_sigma"):
+            if key in user_wind and user_wind[key] != 0.0:
+                raise ConfigError(
+                    f"wind.mode='constant' 인데 wind.{key}={user_wind[key]!r} "
+                    "로 모순됩니다. mode='gust'를 쓰거나 값을 0으로 하세요.")
+        wind["ou_theta"] = 0.0
+        wind["ou_sigma"] = 0.0
+    elif wind["mode"] == "gust" and wind["ou_sigma"] <= 0.0:
+        raise ConfigError(
+            "wind.mode='gust' 인데 ou_sigma 가 0 이하입니다 — 돌풍이 아니라 "
+            f"상수 바람이 됩니다: ou_sigma={wind['ou_sigma']}"
+        )
+
+
+def _validate_ranges(cfg: dict) -> None:
+    if cfg["max_steps"] <= 0:
+        raise ConfigError(f"max_steps는 양수여야 합니다: {cfg['max_steps']}")
+
+    capacity = cfg["fuel"]["capacity"]
+    if capacity is not None and capacity <= 0:
+        raise ConfigError(f"fuel.capacity는 양수이거나 None이어야 합니다: {capacity}")
+
+    if cfg["wind"]["max_speed"] < 0:
+        raise ConfigError(
+            f"wind.max_speed는 음수일 수 없습니다: {cfg['wind']['max_speed']}"
+        )
+    if cfg["wind"]["mode"] not in ("none", "constant", "gust"):
+        raise ConfigError(f"wind.mode가 올바르지 않습니다: {cfg['wind']['mode']!r}")
+
+    for key, value in cfg["success"].items():
+        if value <= 0:
+            raise ConfigError(f"success.{key}는 양수여야 합니다: {value}")
+
+    # v_ref 는 exp(-speed / v_ref) 의 분모다. 0이면 ZeroDivisionError,
+    # 음수면 속도가 빠를수록 점수가 오르도록 부호가 뒤집힌다.
+    if cfg["reward"]["v_ref"] <= 0:
+        raise ConfigError(
+            f"reward.v_ref는 양수여야 합니다: {cfg['reward']['v_ref']}"
+        )
+
+    ground = ROCKET_HEIGHT / 2.0
+    ceiling = WORLD_Y_MAX - ROCKET_HEIGHT / 2.0
+
+    init = cfg["init"]
+    if not ground < init["y"] < ceiling:
+        raise ConfigError(
+            f"init.y는 {ground}와 {ceiling} 사이여야 합니다: {init['y']}")
+    for key in ("x_range", "vy_range", "theta_range_deg", "omega_abs_range_deg"):
+        pair = init[key]
+        if not (isinstance(pair, (list, tuple)) and len(pair) == 2
+                and pair[0] <= pair[1]):
+            raise ConfigError(
+                f"init.{key}는 [최솟값, 최댓값] 2원소여야 합니다: {pair!r}")
+    if not (WORLD_X_MIN < init["x_range"][0]
+            and init["x_range"][1] < WORLD_X_MAX):
+        raise ConfigError(f"init.x_range가 세계 경계를 벗어납니다: {init['x_range']}")
+    # 하한이 양수가 아니면 개루프(짐벌 미사용) 정책이 |omega|=0 을 뽑을 수
+    # 있어, 이 범위를 두는 이유(성공 임계 밖으로 못 벗어나게 하기)가 깨진다.
+    if init["omega_abs_range_deg"][0] <= 0:
+        raise ConfigError(
+            f"init.omega_abs_range_deg의 최솟값은 양수여야 합니다: "
+            f"{init['omega_abs_range_deg']!r}")
+    if not ground < cfg["catch"]["y_arm"] < ceiling:
+        raise ConfigError(
+            f"catch.y_arm은 {ground}와 {ceiling} 사이여야 합니다: "
+            f"{cfg['catch']['y_arm']}")
+    if not WORLD_X_MIN < cfg["catch"]["x_tower"] < WORLD_X_MAX:
+        raise ConfigError(
+            f"catch.x_tower가 세계 경계를 벗어납니다: {cfg['catch']['x_tower']}")
+
+
+def validate_train_config(train_cfg: dict,
+                          eval_cfg: dict) -> tuple[bool, list[str], list[str]]:
+    """학습 설정을 평가 설정과 대조한다.
+
+    Returns:
+        (ok, warnings, errors) — errors가 비어 있으면 ok=True.
+        task 불일치만 오류다. 정책 자체가 다른 문제를 풀도록 학습되기 때문이다.
+    """
+    warnings: list[str] = []
+    errors: list[str] = []
+
+    if train_cfg["task"] != eval_cfg["task"]:
+        errors.append(
+            f"task 불일치: 학습={train_cfg['task']!r} 평가={eval_cfg['task']!r}"
+        )
+
+    for section in WARN_PATHS:
+        for key in eval_cfg.get(section, {}):
+            train_value = train_cfg.get(section, {}).get(key)
+            eval_value = eval_cfg[section][key]
+            if train_value != eval_value:
+                warnings.append(
+                    f"{section}.{key}가 평가와 다릅니다: "
+                    f"학습={train_value} 평가={eval_value}"
+                )
+
+    return (not errors), warnings, errors

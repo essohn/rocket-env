@@ -57,7 +57,7 @@
   - `rocket_env.types.Outcome` — 상수 `IN_PROGRESS, SUCCESS, CRASH, MISSED, TIMEOUT, OUT_OF_FUEL`
   - `rocket_env.physics.integrate(state: State, thrust: float, nozzle_rate: float, wind_x: float) -> State`
   - `rocket_env.physics.fuel_cost(thrust: float) -> float`
-  - 상수 `G, DT, ROCKET_HEIGHT, MOMENT_OF_INERTIA, DRAG_RHO, PHI_MAX, ACTION_TABLE, WORLD_X_MIN, WORLD_X_MAX, WORLD_Y_MIN, WORLD_Y_MAX`
+  - 상수 `G, DT, ROCKET_HEIGHT, MOMENT_OF_INERTIA, TERMINAL_VELOCITY, DRAG_RHO, PHI_MAX, ACTION_TABLE, WORLD_X_MIN, WORLD_X_MAX, WORLD_Y_MIN, WORLD_Y_MAX`
 
 - [ ] **Step 1: 브랜치 생성과 개발 환경 준비**
 
@@ -131,11 +131,11 @@ import pytest
 
 from rocket_env.physics import (
     ACTION_TABLE,
-    DRAG_RHO,
     DT,
     G,
     PHI_MAX,
     ROCKET_HEIGHT,
+    TERMINAL_VELOCITY,
     fuel_cost,
     integrate,
 )
@@ -165,12 +165,16 @@ def test_single_freefall_step_matches_hand_computation():
     assert s.step == 1
 
 
-def test_terminal_velocity_converges_to_minus_g_over_rho():
-    """항력 계수는 종단속도가 약 -49.5 m/s가 되도록 정해져 있다."""
+def test_freefall_reaches_the_designed_terminal_velocity():
+    """시뮬레이션이 설계값 TERMINAL_VELOCITY에 실제로 도달하는지 본다.
+
+    DRAG_RHO를 종단속도에서 역산했으므로, 이 테스트는 계수 계산과 적분이
+    서로 맞물려 돌아가는지 확인하는 독립적 검증이 된다.
+    """
     s = make_state(y=100_000.0)
     for _ in range(2000):
         s = integrate(s, thrust=0.0, nozzle_rate=0.0, wind_x=0.0)
-    assert s.vy == pytest.approx(-G / DRAG_RHO, abs=0.01)
+    assert s.vy == pytest.approx(-TERMINAL_VELOCITY, abs=0.01)
 
 
 def test_drag_vanishes_when_moving_with_the_wind():
@@ -190,11 +194,17 @@ def test_upright_full_thrust_gives_net_upward_acceleration_of_g():
 
 
 def test_gimballed_thrust_produces_torque():
-    s = integrate(make_state(phi=math.radians(10.0)), thrust=G,
-                  nozzle_rate=0.0, wind_x=0.0)
-    ft = -G * math.sin(math.radians(10.0))
-    alpha = ft * (ROCKET_HEIGHT / 2.0) / (ROCKET_HEIGHT**2 / 12.0)
-    assert s.omega == pytest.approx(alpha * DT)
+    """얇은 막대(I = H^2/12)의 H/2 지점에 접선력이 걸리면 alpha = 6*ft/H 다.
+
+    프로덕션 코드와 다른 대수 경로로 유도했으므로 독립적인 오라클이다.
+    프로덕션 수식을 그대로 재계산하면 지렛대 길이나 관성모멘트를 함께
+    잘못 잡은 경우를 잡아낼 수 없다.
+    """
+    phi = math.radians(10.0)
+    s = integrate(make_state(phi=phi), thrust=G, nozzle_rate=0.0, wind_x=0.0)
+    thrust_tangential = -G * math.sin(phi)
+    expected_alpha = 6.0 * thrust_tangential / ROCKET_HEIGHT
+    assert s.omega == pytest.approx(expected_alpha * DT)
     assert s.omega < 0.0
 
 
@@ -287,9 +297,12 @@ ROCKET_HEIGHT = 50.0                       # 기체 길이 (m)
 MOMENT_OF_INERTIA = ROCKET_HEIGHT**2 / 12.0  # 얇은 막대의 관성모멘트 (단위질량)
 PHI_MAX = math.radians(20.0)               # 노즐 짐벌 한계 (rad)
 
-# 항력 계수. 125 m 자유낙하 후 항력이 중력과 같아지도록 정한 값이며,
-# 결과적으로 종단속도가 G / DRAG_RHO ~= 49.5 m/s 가 된다.
-DRAG_RHO = 1.0 / math.sqrt(125.0 / (G / 2.0))
+# 항력 계수는 종단속도를 설계값으로 두고 역산한다. 무동력 낙하가 평형에
+# 이르면 DRAG_RHO * v = G 이므로 DRAG_RHO = G / v_term.
+# 계수 자체는 물리 법칙이 정해주지 않는 설계 선택이므로, 의미가 바로 읽히는
+# 양(종단속도)으로 고르는 편이 학생에게도 검증하기 쉽다.
+TERMINAL_VELOCITY = 49.5                   # 무동력 낙하 종단속도 (m/s)
+DRAG_RHO = G / TERMINAL_VELOCITY
 
 # --- 세계 경계 ---
 WORLD_X_MIN, WORLD_X_MAX = -300.0, 300.0
@@ -315,23 +328,23 @@ def integrate(state: State, thrust: float, nozzle_rate: float,
               wind_x: float) -> State:
     """한 스텝 적분한 새 State를 반환한다.
 
-    힘 분해:
-        ft = -f·sin(phi)   노즐 접선 성분 (토크를 만든다)
-        fr =  f·cos(phi)   노즐 축 성분 (기체를 밀어올린다)
+    추력을 기체 기준 두 성분으로 나눈 뒤 세계 좌표로 회전시킨다.
+    접선 성분만 토크를 만들고, 축 성분만 기체를 밀어올린다.
 
     항력은 지면 기준 속도가 아니라 **공기 기준 상대속도**에 비례한다.
     바람이 새로운 힘 항이 아니라 기존 항력 항의 수정으로 들어가는 이유다.
     """
     theta, phi = state.theta, state.phi
 
-    ft = -thrust * math.sin(phi)
-    fr = thrust * math.cos(phi)
-    fx = ft * math.cos(theta) - fr * math.sin(theta)
-    fy = ft * math.sin(theta) + fr * math.cos(theta)
+    thrust_tangential = -thrust * math.sin(phi)   # 옆 방향 성분 → 토크
+    thrust_axial = thrust * math.cos(phi)         # 기체 축 방향 성분 → 추진
+
+    fx = thrust_tangential * math.cos(theta) - thrust_axial * math.sin(theta)
+    fy = thrust_tangential * math.sin(theta) + thrust_axial * math.cos(theta)
 
     ax = fx - DRAG_RHO * (state.vx - wind_x)
     ay = fy - G - DRAG_RHO * state.vy
-    alpha = ft * (ROCKET_HEIGHT / 2.0) / MOMENT_OF_INERTIA
+    alpha = thrust_tangential * (ROCKET_HEIGHT / 2.0) / MOMENT_OF_INERTIA
 
     return replace(
         state,
@@ -353,7 +366,7 @@ def integrate(state: State, thrust: float, nozzle_rate: float,
 uv run pytest tests/test_physics.py -v
 ```
 
-기대: 11 passed.
+기대: 10 passed.
 
 - [ ] **Step 9: 커밋**
 
@@ -603,8 +616,14 @@ def test_explicit_user_value_beats_catch_profile():
 
 
 def test_locked_key_raises_config_error():
+    """잠금 키는 '알 수 없는 키'가 아니라 잠금 전용 메시지로 거부되어야 한다.
+
+    잠금 키는 스키마에도 없으므로 두 검사의 순서가 뒤바뀌면 unknown-key
+    메시지가 나온다. `match=key` 로는 두 메시지 모두에 키 이름이 들어가
+    구별하지 못하므로, 잠금 메시지에만 있는 문구를 단언해 순서를 고정한다.
+    """
     for key in ("dt", "g", "H", "observation", "action"):
-        with pytest.raises(ConfigError, match=key):
+        with pytest.raises(ConfigError, match="환경 상수"):
             build_config({key: 1})
 
 
@@ -623,6 +642,11 @@ def test_negative_fuel_capacity_raises_config_error():
         build_config({"fuel": {"capacity": -1.0}})
 
 
+def test_non_positive_v_ref_raises_config_error():
+    with pytest.raises(ConfigError, match="v_ref"):
+        build_config({"reward": {"v_ref": 0.0}})
+
+
 def test_none_fuel_capacity_is_allowed():
     assert build_config({"fuel": {"capacity": None}})["fuel"]["capacity"] is None
 
@@ -635,6 +659,43 @@ def test_every_preset_builds(name):
     cfg = build_config(PRESETS[name])
     assert cfg["task"] in ("landing", "catch")
     assert cfg["reward"]["shaping_gamma"] == 1.0
+
+
+def test_unknown_top_level_key_raises_config_error():
+    with pytest.raises(ConfigError, match="wnid"):
+        build_config({"wnid": {"mode": "none"}})
+
+
+def test_unknown_nested_key_raises_config_error():
+    """오타 난 키가 조용히 무시되면 설정 없이 학습이 끝난다."""
+    with pytest.raises(ConfigError, match="fuel.capacty"):
+        build_config({"fuel": {"capacty": 50.0}})
+
+
+@pytest.mark.parametrize("name,path,expected", [
+    ("landing-easy", ("wind", "max_speed"), 0.0),
+    ("landing-easy", ("fuel", "capacity"), None),
+    ("landing-normal", ("wind", "max_speed"), 8.0),
+    ("landing-normal", ("fuel", "capacity"), 120.0),
+    ("landing-hard", ("wind", "ou_sigma"), 3.0),
+    ("landing-hard", ("fuel", "capacity"), 90.0),
+    ("landing-hard", ("success", "zone_r"), 30.0),
+    ("catch-normal", ("fuel", "capacity"), 140.0),
+    ("catch-normal", ("success", "zone_r"), 6.0),
+    ("catch-normal", ("reward", "w_speed"), 60.0),
+    ("catch-hard", ("wind", "max_speed"), 12.0),
+    ("catch-hard", ("fuel", "capacity"), 110.0),
+])
+def test_preset_literal_values(name, path, expected):
+    """프리셋 리터럴을 고정한다.
+
+    이 값들이 각 라운드의 난이도와 배점을 정한다. 자리 하나가 바뀌어도
+    나머지 테스트는 전부 통과하므로, 값 자체를 단언하는 곳이 필요하다.
+    """
+    value = build_config(PRESETS[name])
+    for key in path:
+        value = value[key]
+    assert value == expected
 
 
 def test_reward_change_is_free_and_produces_no_warning():
@@ -820,6 +881,25 @@ def _deep_merge(base: dict, overlay: dict) -> dict:
     return out
 
 
+def _reject_unknown_keys(user: dict, schema: dict, path: str = "") -> None:
+    """스키마에 없는 키를 거부한다.
+
+    오타 난 키가 조용히 무시되는 것이 가장 나쁜 실패 모드다.
+    `{"fuel": {"capacty": 50.0}}` 처럼 한 글자만 틀려도 병합은 성공하고,
+    의도한 설정이 전혀 적용되지 않은 채로 몇 시간짜리 학습이 끝난다.
+    라운드 설정을 쓰는 조교도 학생도 이 실수는 즉시 알아야 한다.
+    """
+    for key, value in user.items():
+        full = f"{path}{key}"
+        if key not in schema:
+            raise ConfigError(
+                f"알 수 없는 설정 키: {full!r}. "
+                f"사용 가능한 키: {sorted(schema)}"
+            )
+        if isinstance(value, dict) and isinstance(schema[key], dict):
+            _reject_unknown_keys(value, schema[key], path=f"{full}.")
+
+
 def build_config(user_config: dict | None) -> dict:
     """기본값 → 태스크 프로파일 → 사용자 설정 순으로 병합한 완전한 설정."""
     user = user_config or {}
@@ -829,6 +909,8 @@ def build_config(user_config: dict | None) -> dict:
         raise ConfigError(
             f"다음 키는 환경 상수라 변경할 수 없습니다: {sorted(locked)}"
         )
+
+    _reject_unknown_keys(user, DEFAULT_CONFIG)
 
     task = user.get("task", DEFAULT_CONFIG["task"])
     if task not in ("landing", "catch"):
@@ -861,6 +943,13 @@ def _validate_ranges(cfg: dict) -> None:
     for key, value in cfg["success"].items():
         if value <= 0:
             raise ConfigError(f"success.{key}는 양수여야 합니다: {value}")
+
+    # v_ref 는 exp(-speed / v_ref) 의 분모다. 0이면 ZeroDivisionError,
+    # 음수면 속도가 빠를수록 점수가 오르도록 부호가 뒤집힌다.
+    if cfg["reward"]["v_ref"] <= 0:
+        raise ConfigError(
+            f"reward.v_ref는 양수여야 합니다: {cfg['reward']['v_ref']}"
+        )
 
 
 def validate_train_config(train_cfg: dict,
@@ -898,7 +987,7 @@ def validate_train_config(train_cfg: dict,
 uv run pytest tests/test_config.py -v
 ```
 
-기대: 17 passed (parametrize 5건 포함).
+기대: 33 passed (parametrize 5 + 12건 포함).
 
 - [ ] **Step 5: 커밋**
 
@@ -1005,6 +1094,39 @@ def test_flying_off_the_top_crashes():
 def test_flying_off_the_side_crashes():
     cur = at(x=301.0)
     assert TASK.evaluate(at(x=299.0), cur, CFG) == Outcome.CRASH
+
+
+def test_touchdown_exactly_at_speed_threshold_crashes():
+    """임계값 비교는 strict `<` 다 — 정확히 임계값이면 실패한다.
+
+    ±0.1로만 찔러보는 테스트는 `<` 와 `<=` 를 구별하지 못한다. 성적을
+    만드는 코드에서 이 한 칸이 '겨우 통과'와 '겨우 실패'를 가른다.
+    """
+    cur = at(y=GROUND - 0.1, vy=-CFG["success"]["v_max"])
+    assert TASK.evaluate(at(y=GROUND + 5.0), cur, CFG) == Outcome.CRASH
+
+
+def test_touchdown_exactly_at_pad_edge_crashes():
+    cur = at(y=GROUND - 0.1, x=CFG["success"]["zone_r"], vy=-1.0)
+    assert TASK.evaluate(at(y=GROUND + 5.0), cur, CFG) == Outcome.CRASH
+
+
+def test_touchdown_exactly_at_tilt_threshold_crashes():
+    cur = at(y=GROUND - 0.1, vy=-1.0,
+             theta=math.radians(CFG["success"]["theta_max_deg"]))
+    assert TASK.evaluate(at(y=GROUND + 5.0), cur, CFG) == Outcome.CRASH
+
+
+def test_touchdown_exactly_at_spin_threshold_crashes():
+    cur = at(y=GROUND - 0.1, vy=-1.0,
+             omega=math.radians(CFG["success"]["omega_max_deg"]))
+    assert TASK.evaluate(at(y=GROUND + 5.0), cur, CFG) == Outcome.CRASH
+
+
+def test_ground_contact_triggers_exactly_at_ground_level():
+    """접지 판정만 `<=` 다 — 정확히 지면 높이에 닿으면 접지로 본다."""
+    cur = at(y=GROUND, vy=-1.0)
+    assert TASK.evaluate(at(y=GROUND + 5.0), cur, CFG) == Outcome.SUCCESS
 
 
 def test_initial_state_respects_config_ranges():
@@ -1176,7 +1298,7 @@ def make_task(name: str) -> Task:
 uv run pytest tests/test_task_landing.py -v
 ```
 
-기대: 13 passed.
+기대: 17 passed.
 
 - [ ] **Step 7: 커밋**
 
@@ -1287,6 +1409,36 @@ def test_hovering_below_the_arm_does_not_retrigger():
     assert TASK.evaluate(at(y=Y_ARM - 5.0), at(y=Y_ARM - 6.0), CFG) is None
 
 
+def test_crossing_exactly_at_arm_height_is_judged():
+    """`y_arm >= cur.y` 는 등호를 포함한다 — 정확히 팔 높이에 닿아도 판정한다.
+
+    다른 테스트는 전부 Y_ARM - 0.1 을 쓰므로 등호를 빼도(`>` 로 바꿔도)
+    모두 통과한다. 이 테스트가 그 한 칸을 고정한다.
+    """
+    prev, cur = at(y=Y_ARM + 1.0), at(y=Y_ARM, vy=-1.0)
+    assert TASK.evaluate(prev, cur, CFG) == Outcome.SUCCESS
+
+
+def test_starting_exactly_at_arm_height_is_not_a_crossing():
+    """`prev.y > y_arm` 은 strict 다 — 팔 높이에서 출발하면 통과가 아니다.
+
+    등호를 허용하면 팔 높이 부근에서 맴도는 로켓이 매 스텝 재판정된다.
+    """
+    prev, cur = at(y=Y_ARM, vy=-1.0), at(y=Y_ARM - 0.1, vy=-1.0)
+    assert TASK.evaluate(prev, cur, CFG) is None
+
+
+def test_step_that_reverses_to_upward_is_not_judged():
+    """`cur.vy < 0` 가드가 실제로 지키는 유일한 경우.
+
+    한 스텝의 순 변위는 아래쪽인데 끝 속도가 위로 뒤집힌 상태 — 팔 높이
+    부근에서 거의 멈췄다가 반등하는 순간이다. test_crossing_upward_is_not_judged
+    는 y 순서 조건만으로 이미 걸러져서 이 가드를 전혀 시험하지 못한다.
+    """
+    prev, cur = at(y=Y_ARM + 0.05, vy=-0.3), at(y=Y_ARM - 0.01, vy=+0.1)
+    assert TASK.evaluate(prev, cur, CFG) is None
+
+
 def test_reaching_the_ground_without_crossing_crashes():
     from rocket_env.tasks.base import GROUND_Y
     assert TASK.evaluate(at(y=GROUND_Y + 1.0),
@@ -1385,7 +1537,7 @@ def make_task(name: str) -> Task:
 uv run pytest tests/test_task_catch.py tests/test_task_landing.py -v
 ```
 
-기대: 24 passed.
+기대: 31 passed.
 
 - [ ] **Step 6: 커밋**
 
@@ -1538,13 +1690,20 @@ def test_failure_reward_has_no_time_term():
     assert early == pytest.approx(late)
 
 
-@pytest.mark.parametrize("outcome", [
-    Outcome.CRASH, Outcome.MISSED, Outcome.TIMEOUT, Outcome.OUT_OF_FUEL,
-])
-def test_all_failure_outcomes_share_the_same_formula(outcome):
-    r = terminal_reward(outcome, at(x=10.0, y=100.0), TARGET, CFG,
+def test_all_failure_outcomes_share_the_same_formula():
+    """네 가지 실패는 동일한 값을 내야 한다.
+
+    각각 범위 안에 있는지만 보면, MISSED 에만 다른 공식이 붙어도 통과한다.
+    """
+    state = at(x=10.0, y=100.0)
+    scores = [
+        terminal_reward(outcome, state, TARGET, CFG,
                         d_initial=425.0, fuel_frac=0.5)
-    assert 0.0 <= r <= CFG["reward"]["failure_max"]
+        for outcome in (Outcome.CRASH, Outcome.MISSED,
+                        Outcome.TIMEOUT, Outcome.OUT_OF_FUEL)
+    ]
+    assert len(set(scores)) == 1
+    assert 0.0 <= scores[0] <= CFG["reward"]["failure_max"]
 
 
 def test_catch_profile_rewards_slow_contact_much_more_steeply():
@@ -1560,10 +1719,36 @@ def test_catch_profile_rewards_slow_contact_much_more_steeply():
     assert score(0.0) - score(1.0) > score(3.0) - score(4.0)
 
 
-def test_zero_initial_distance_does_not_divide_by_zero():
+def test_crash_without_progress_scores_zero_at_any_initial_distance():
+    """진행이 없으면 출발 거리와 무관하게 0점이다.
+
+    예전 구현은 분모를 max(d_initial, 1.0)으로 눌렀다. 그러면 목표
+    근처에서 출발했을 때 분모만 1.0으로 올라가고 분자는 작은 실제 거리라서,
+    제자리 추락에도 양수 점수가 나온다 — 이 모듈이 막으려는 바로 그
+    '빨리 자폭' 꼼수다. 현재 프리셋은 d_initial >= 370 이라 도달할 수
+    없지만, 저고도에서 시작하는 라운드를 새로 만들면 되살아난다.
+    """
+    for d in (0.5, 2.0, 425.0):
+        state = at(x=d, y=25.0)          # 목표에서 정확히 d 만큼 떨어진 지점
+        r = terminal_reward(Outcome.CRASH, state, TARGET, CFG,
+                            d_initial=d, fuel_frac=0.5)
+        assert r == pytest.approx(0.0)
+
+
+def test_zero_initial_distance_scores_zero():
     r = terminal_reward(Outcome.CRASH, at(x=0.0, y=25.0), TARGET, CFG,
                         d_initial=0.0, fuel_frac=0.0)
-    assert math.isfinite(r)
+    assert r == 0.0
+
+
+def test_shaping_reads_gamma_from_config():
+    """shaping 이 cfg 의 감가율을 실제로 읽는지 확인한다.
+
+    gamma 를 1.0으로 하드코딩한 구현도 기본 설정에서는 텔레스코핑
+    테스트를 전부 통과한다. 다른 값을 넣어야 비로소 드러난다.
+    """
+    cfg = build_config({"reward": {"shaping_gamma": 0.5}})
+    assert shaping(-2.0, -1.0, cfg) == pytest.approx(0.5 * -1.0 - (-2.0))
 ```
 
 - [ ] **Step 2: 테스트 실패 확인**
@@ -1581,9 +1766,11 @@ uv run pytest tests/test_reward.py -v
 
 두 부분으로 나뉜다.
 
-1. 스텝 보상 — 잠재함수 기반 shaping(PBRS) + 연료 패널티.
+1. 스텝 보상 — 잠재함수 기반 shaping(PBRS).
    shaping_gamma=1.0이면 shaping 총합이 정확히 Φ(s_T) - Φ(s_0)로 접히므로,
    에피소드가 길다고 점수가 쌓이지 않는다.
+   연료 패널티(cfg["reward"]["fuel_penalty"])는 실제 소모량을 아는
+   env.step()에서 더한다. 이 모듈은 소모량을 모른다.
 
 2. 종료 보상 — 성공은 기본점 + 품질 보너스, 실패는 목표를 향한 '진행도'.
    실패 보상에 시간 항이 전혀 없다는 점이 중요하다. 원본 환경은 실패에도
@@ -1641,7 +1828,10 @@ def terminal_reward(outcome: str, state: State, target: tuple[float, float],
 
     if outcome in _FAILURE_OUTCOMES:
         d_final = distance_to_target(state, target)
-        progress = 1.0 - d_final / max(d_initial, 1.0)
+        if d_initial <= 0.0:
+            # 출발점이 목표와 정확히 겹치면 '진행도'가 정의되지 않는다.
+            return 0.0
+        progress = 1.0 - d_final / d_initial
         return r["failure_max"] * min(max(progress, 0.0), 1.0)
 
     raise ValueError(f"종료 보상을 계산할 수 없는 outcome: {outcome!r}")
@@ -1653,7 +1843,7 @@ def terminal_reward(outcome: str, state: State, target: tuple[float, float],
 uv run pytest tests/test_reward.py -v
 ```
 
-기대: 16 passed (parametrize 4건 포함).
+기대: 15 passed.
 
 - [ ] **Step 5: 커밋**
 
@@ -1696,6 +1886,8 @@ EOF
 
 import math
 
+from dataclasses import replace
+
 import gymnasium as gym
 import numpy as np
 import pytest
@@ -1704,6 +1896,7 @@ from gymnasium.utils.env_checker import check_env
 import rocket_env  # noqa: F401  — 환경 등록 트리거
 from rocket_env.config import PRESETS
 from rocket_env.env import OBS_DIM, RocketEnv
+from rocket_env.reward import potential
 from rocket_env.types import Outcome
 
 NOOP = 1        # 추력 0, 노즐 정지
@@ -1836,6 +2029,61 @@ def test_wind_disabled_config_keeps_wind_at_zero():
         assert info["wind_x"] == 0.0
         if terminated or truncated:
             break
+
+
+def test_step_reward_matches_hand_computed_shaping():
+    """스텝 보상이 실제로 Φ 변화를 반영하는지 수치로 확인한다.
+
+    _potential 을 읽기 전에 덮어쓰면 shaping 이 매 스텝 정확히 0이 되는데,
+    나머지 테스트는 전부 통과한다 — 아무도 보상값을 보지 않기 때문이다.
+    추력 0인 NOOP 을 써서 연료 패널티 항을 0으로 만들고 shaping 만 남긴다.
+    """
+    env = RocketEnv(config=PRESETS["landing-easy"])
+    env.reset(seed=0)
+    inner = env.unwrapped
+    before = potential(inner.state, inner._target, inner.cfg)
+
+    _, reward, _, _, _ = env.step(NOOP)
+
+    after = potential(inner.state, inner._target, inner.cfg)
+    gamma = inner.cfg["reward"]["shaping_gamma"]
+    assert reward == pytest.approx(gamma * after - before)
+    assert reward != 0.0
+
+
+def test_observation_places_sin_and_cos_in_the_right_slots():
+    """자세 30도면 sin=0.5, cos=0.866 으로 값이 뚜렷이 달라 뒤바뀜이 드러난다."""
+    env = RocketEnv(config=PRESETS["landing-normal"])
+    env.reset(seed=0)
+    inner = env.unwrapped
+    inner.state = replace(inner.state, theta=math.radians(30.0))
+    obs = inner._observation()
+    assert obs[4] == pytest.approx(0.5, abs=1e-6)
+    assert obs[5] == pytest.approx(math.sqrt(3.0) / 2.0, abs=1e-6)
+
+
+def test_observation_uses_distinct_scales_for_position_and_velocity():
+    """위치와 속도를 같은 상수로 나누면 물리적으로 다른 양이 같은 값이 된다."""
+    env = RocketEnv(config=PRESETS["landing-normal"])
+    env.reset(seed=0)
+    inner = env.unwrapped
+    tx, ty = inner._target
+    inner.state = replace(inner.state, x=tx + 150.0, y=ty, vx=25.0, vy=0.0)
+    obs = inner._observation()
+    assert obs[0] == pytest.approx(0.5)    # 150 / 300
+    assert obs[1] == pytest.approx(0.0)
+    assert obs[2] == pytest.approx(0.5)    # 25 / 50
+    assert obs[3] == pytest.approx(0.0)
+
+
+def test_observation_reports_time_and_wind_fractions():
+    env = RocketEnv(config={**PRESETS["landing-normal"], "max_steps": 100})
+    env.reset(seed=0)
+    inner = env.unwrapped
+    inner.state = replace(inner.state, step=25, wind_x=10.0)
+    obs = inner._observation()
+    assert obs[9] == pytest.approx(0.5)     # 10 / 20
+    assert obs[10] == pytest.approx(0.25)   # 25 / 100
 
 
 def test_catch_task_can_be_selected_by_config():
@@ -2087,7 +2335,7 @@ register(id="rocket-catch-v0", entry_point="rocket_env:_make_catch",
 uv run pytest tests/test_env.py -v
 ```
 
-기대: 16 passed.
+기대: 20 passed.
 
 - [ ] **Step 6: 전체 테스트 실행**
 
@@ -2141,10 +2389,13 @@ EOF
 형태로 박아둔다.
 """
 
+import numpy as np
 import pytest
 
 from rocket_env.config import PRESETS, build_config
 from rocket_env.env import RocketEnv
+from rocket_env.reward import potential
+from rocket_env.tasks import make_task
 from rocket_env.types import Outcome
 
 NOOP = 1        # 추력 0 — 가장 빠른 추락
@@ -2153,8 +2404,21 @@ FULL_UP = 10    # 추력 2.0g, 노즐 정지 — 위로 이탈
 
 SEEDS = range(12)
 
-# shaping 총합의 이론적 상한. Φ ∈ [-3.8, 0]이므로 |ΣF| ≤ 3.8.
-SHAPING_BOUND = 4.0
+# shaping 총합의 상한.
+#
+# shaping_gamma=1.0 이라 shaping 항은 정확히 Φ(s_T) - Φ(s_0) 로 접힌다.
+# Φ <= 0 이므로 Φ(s_T) 의 최대는 0이고, 따라서 총합의 상한은 -Φ(s_0) 다.
+# 즉 상한을 정하는 것은 중간 경로가 아니라 **초기 조건뿐**이다.
+# (도달 가능한 상태 전체에서 Φ 의 최소를 찾는 것은 다른 양이며, 그렇게
+#  계산하면 3.8 이 나오지만 그것은 이 상한과 무관하다.)
+#
+# 프리셋별 초기 분포에서 계산한 -Φ(s_0) 의 최악값:
+#   landing-easy   1.83    catch-normal  1.73
+#   landing-normal 2.17    catch-hard    2.07
+#   landing-hard   2.56  <- 최댓값
+# 여유를 두어 3.0 으로 잡는다. 4.0 은 실측 최대(약 0.54)의 7배라
+# 실제 회귀가 숨을 여지가 너무 컸다.
+SHAPING_BOUND = 3.0
 
 
 def rollout(config, action, seed):
@@ -2181,13 +2445,42 @@ def test_no_fixed_action_policy_ever_succeeds(preset, action):
 @pytest.mark.parametrize("action", [NOOP, HOVER, FULL_UP])
 @pytest.mark.parametrize("preset", list(PRESETS))
 def test_failure_returns_stay_under_the_failure_ceiling(preset, action):
-    """실패 에피소드 점수는 failure_max + shaping 상한을 넘을 수 없다."""
+    """실패 에피소드 점수는 failure_max + shaping 상한을 넘을 수 없다.
+
+    세 행동 모두 노즐을 고정하므로, 짐벌을 흔들거나 행동을 번갈아 쓰는
+    정책은 직접 시험하지 않는다. 그래도 이 상한은 그런 정책에도 유효하다 —
+    PBRS 텔레스코핑 때문에 shaping 총합이 Φ(s_T) - Φ(s_0) 로 결정되고
+    Φ(s_T) <= 0 이므로, 어떤 경로를 밟든 초기 조건이 정한 상한을 넘을 수
+    없기 때문이다. 경로가 아니라 끝점만이 점수를 정한다.
+    """
     cfg = build_config(PRESETS[preset])
     ceiling = cfg["reward"]["failure_max"] + SHAPING_BOUND
     for seed in SEEDS:
         total, info = rollout(PRESETS[preset], action, seed)
         assert info["outcome"] != Outcome.SUCCESS
         assert total <= ceiling
+
+
+def test_shaping_bound_covers_every_preset_initial_state():
+    """SHAPING_BOUND 가 실제 초기 조건 분포를 덮는지 직접 확인한다.
+
+    shaping 총합의 상한은 -Φ(s_0) 이고, 오직 초기 조건만으로 정해진다.
+    고정 행동 세 개로는 그 최악 구석(진행도가 1에 가까우면서 Φ(s_T)도
+    0에 가까운 실패)에 닿지 못하므로, 굴려서 확인하는 대신 초기 상태를
+    직접 표본화해 확인한다.
+
+    이 테스트의 진짜 값은 회귀 방어다. 누군가 init.y 를 낮추거나
+    theta_range_deg 를 넓히면 -Φ(s_0) 가 커지는데, 상한을 함께 올리지
+    않으면 여기서 먼저 걸린다.
+    """
+    for name, preset in PRESETS.items():
+        cfg = build_config(preset)
+        task = make_task(cfg["task"])
+        target = task.target(cfg)
+        rng = np.random.default_rng(0)
+        worst = max(-potential(task.initial_state(rng, cfg), target, cfg)
+                    for _ in range(200))
+        assert worst < SHAPING_BOUND, f"{name}: -Phi(s0)={worst:.3f}"
 
 
 def test_loitering_does_not_out_score_descending():
@@ -2242,7 +2535,7 @@ uv run pytest tests/test_exploit_regression.py -v
 ```
 
 기대: 전부 passed. 실패하면 **테스트가 아니라 보상 설계를 고친다.**
-특히 `test_crashing_early_is_not_rewarded_more_than_crashing_late`가 실패하면
+특히 `test_shorter_episodes_do_not_earn_more_than_longer_ones`가 실패하면
 `terminal_reward`의 실패 분기에 시간 의존성이 들어간 것이다.
 
 - [ ] **Step 3: 커밋**
@@ -2286,7 +2579,8 @@ EOF
 """렌더링 smoke 테스트.
 
 픽셀 값을 검증하지는 않는다. 크래시 없이 올바른 형태의 배열이 나오는지,
-두 태스크와 모든 종료 상태에서 그려지는지만 본다.
+두 태스크와 모든 종료 상태에서 그려지는지를 본다. 다만 학생이 오해할 수
+있는 두 지점 — 포획 창 폭과 렌더러 여러 개의 수명 — 은 따로 고정한다.
 """
 
 import os
@@ -2339,6 +2633,31 @@ def test_every_outcome_banner_draws(outcome):
     frame = renderer.draw(a_state(cfg), (0.0, 25.0), outcome)
     assert frame.shape == (HEIGHT, WIDTH, 3)
     renderer.close()
+
+
+def test_catch_capture_window_matches_the_success_threshold():
+    """그려지는 포획 창은 실제 판정 범위와 정확히 같아야 한다.
+
+    팔 구조물은 보이도록 넓게 그리지만, 판정 범위를 따로 표시하지 않으면
+    학생은 팔 안쪽으로 지나갔는데 MISSED 가 뜨는 이유를 알 수 없다.
+    """
+    cfg = build_config(PRESETS["catch-normal"])
+    renderer = Renderer(cfg, "rgb_array")
+    _, _, arm_half, window_half = renderer._catch_geometry((0.0, 80.0))
+    assert window_half == cfg["success"]["zone_r"]
+    assert arm_half > window_half
+    renderer.close()
+
+
+def test_closing_one_renderer_does_not_break_another():
+    """close() 가 pygame 을 전역 종료하면 살아 있는 다른 렌더러가 깨진다."""
+    cfg = build_config(PRESETS["landing-normal"])
+    first = Renderer(cfg, "rgb_array")
+    second = Renderer(cfg, "rgb_array")
+    first.close()
+    frame = second.draw(a_state(cfg), (0.0, 25.0), Outcome.IN_PROGRESS)
+    assert frame.shape == (HEIGHT, WIDTH, 3)
+    second.close()
 
 
 def test_render_returns_none_when_render_mode_is_none():
@@ -2463,7 +2782,13 @@ class Renderer:
         return np.transpose(pygame.surfarray.array3d(self.surface), (1, 0, 2))
 
     def close(self) -> None:
-        pygame.quit()
+        """디스플레이만 닫는다.
+
+        pygame.quit() 은 프로세스 전역이다. 노트북에서 렌더링 환경을 둘
+        이상 띄워둔 채 하나를 닫으면 나머지의 폰트와 서피스까지 무효가 된다.
+        """
+        if self.render_mode == "human":
+            pygame.display.quit()
 
     # --- 좌표 변환 ---
 
@@ -2494,15 +2819,32 @@ class Renderer:
             pygame.draw.line(self.surface, PAD_COLOR, left, right, 6)
             return
 
-        x_tower = self.cfg["catch"]["x_tower"]
-        y_arm = self.cfg["catch"]["y_arm"]
-        zone_r = self.cfg["success"]["zone_r"]
+        x_tower, y_arm, arm_half, window_half = self._catch_geometry(target)
         base = self._to_px(x_tower, 0.0)
         top = self._to_px(x_tower, y_arm * 1.25)
         pygame.draw.line(self.surface, TOWER_COLOR, base, top, 8)
-        left = self._to_px(x_tower - zone_r * 3.0, y_arm)
-        right = self._to_px(x_tower + zone_r * 3.0, y_arm)
-        pygame.draw.line(self.surface, ARM_COLOR, left, right, 7)
+
+        # 팔 구조물. 포획 창보다 넓게 그린다 — 6 m 는 화면에서 13 px 밖에
+        # 안 돼서 구조물로 알아보기 어렵다.
+        pygame.draw.line(self.surface, TOWER_COLOR,
+                         self._to_px(x_tower - arm_half, y_arm),
+                         self._to_px(x_tower + arm_half, y_arm), 7)
+        # 실제 포획 판정 범위(±zone_r). 이걸 따로 그리지 않으면 학생은
+        # 팔 안쪽으로 잘 지나간 것처럼 보이는데 MISSED 가 뜨는 이유를
+        # 알 수 없다. 디버깅하라고 만든 그림이 디버깅을 방해하게 된다.
+        pygame.draw.line(self.surface, ARM_COLOR,
+                         self._to_px(x_tower - window_half, y_arm),
+                         self._to_px(x_tower + window_half, y_arm), 11)
+
+    def _catch_geometry(self, target: tuple[float, float]):
+        """타워 x, 팔 높이, 팔 반폭, 실제 포획 창 반폭을 돌려준다.
+
+        구조물 폭과 판정 폭을 한곳에서 분리해 두어야, 렌더러가 임계값을
+        잘못 그리는 일이 생기지 않고 테스트로 고정할 수도 있다.
+        """
+        x_tower, y_arm = target
+        window_half = self.cfg["success"]["zone_r"]
+        return x_tower, y_arm, max(window_half * 3.0, 18.0), window_half
 
     def _trail(self) -> None:
         if len(self.trail) < 2:
@@ -2532,7 +2874,8 @@ class Renderer:
             return
         length = 6.0 + 22.0 * (state.thrust / (2.0 * G))
         nozzle = (0.0, -ROCKET_HEIGHT / 2.0)
-        tip = (length * math.sin(state.phi), -ROCKET_HEIGHT / 2.0 - length)
+        tip = (length * math.sin(state.phi),
+               -ROCKET_HEIGHT / 2.0 - length * math.cos(state.phi))
         color = (255, 210, 90) if state.thrust < 1.5 * G else (255, 140, 60)
         points = [
             self._body_to_px(state, nozzle[0] - 3.0, nozzle[1]),
@@ -2578,7 +2921,7 @@ class Renderer:
 SDL_VIDEODRIVER=dummy uv run pytest tests/test_render.py -v
 ```
 
-기대: 12 passed (parametrize 포함).
+기대: 14 passed (parametrize 포함).
 
 - [ ] **Step 5: 전체 테스트 실행**
 
@@ -2851,6 +3194,1146 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 EOF
 )"
 ```
+
+---
+
+### Task 11: 보상 재설계 — 학습 가능한 채점 신호
+
+**배경.** 최종 리뷰가 실측했다. `landing-easy` 40시드에서 무행동 정책이 36.6점,
+DQN 세 번(120k~300k step)이 전부 30~35점으로 **무행동보다 낮았다.** 손으로 짠
+고전 제어기는 60/60 성공에 평균 201.2점이므로 환경 자체는 풀린다. 문제는 보상이다.
+
+원인 셋: (1) 목표가 지면에 있어 **중력이 거리를 공짜로 닫는다** — 자유낙하만으로
+실패 점수의 80~89%를 받는다. (2) `Φ`에 속도 항이 없어 밀집 신호가 성공을 가르는
+접지 속도를 전혀 가리키지 않는다. (3) `θ`가 래핑되지 않아 여러 바퀴 돈 상태에서
+`Φ`가 무한정 작아지는데, 관찰은 `sin/cos`라 감김 횟수를 볼 수 없다(비마르코프).
+
+**Files:**
+- Modify: `rocket_env/reward.py`, `rocket_env/config.py`, `rocket_env/env.py`
+- Modify: `tests/test_reward.py`, `tests/test_exploit_regression.py`
+- Create: `scripts/measure_baseline.py`
+
+**Interfaces (변경):**
+- `terminal_reward(outcome, state, target, cfg, fuel_frac) -> float` — **`d_initial` 인자 제거**
+- `potential(state, target, cfg)` — 속도 항 추가, `θ` 래핑
+- `rocket_env.reward.POTENTIAL_SPEED_SCALE = 50.0`
+- `cfg["reward"]["shaping_w_speed"]` 신규 (기본 0.5)
+- `distance_to_target` **삭제** (더 이상 쓰이지 않음)
+
+- [ ] **Step 1: 실패하는 테스트 작성**
+
+`tests/test_reward.py`에서 `d_initial`을 쓰는 기존 테스트 4개
+(`test_crash_at_start_position_scores_zero`,
+`test_crash_at_target_scores_the_failure_maximum`,
+`test_crash_without_progress_scores_zero_at_any_initial_distance`,
+`test_zero_initial_distance_scores_zero`)를 아래로 **교체**하고,
+남은 `terminal_reward` 호출부의 `d_initial=` 인자를 전부 제거한다.
+`distance_to_target` import와 그 사용처도 지운다.
+
+```python
+def test_freefall_impact_scores_zero():
+    """자유낙하로 지면에 꽂히면 0점이다.
+
+    예전에는 목표까지의 직선 거리로 채점해서, 목표가 지면에 있는 탓에
+    중력이 거리를 공짜로 닫아 주었다. 아무것도 안 하는 정책이 실패 점수의
+    80~89%를 받았고, 학습된 DQN 이 무행동보다 낮은 점수를 받았다.
+    """
+    impact = at(x=0.0, y=25.0, vy=-49.5)     # 종단속도로 접지
+    r = terminal_reward(Outcome.CRASH, impact, TARGET, CFG, fuel_frac=0.5)
+    assert r == pytest.approx(0.0)
+
+
+def test_high_hover_timeout_scores_zero():
+    """목표 고도에 도달하지 못하면 다른 조건이 완벽해도 0점이다."""
+    hovering = at(x=0.0, y=400.0, vx=0.0, vy=0.0)
+    r = terminal_reward(Outcome.TIMEOUT, hovering, TARGET, CFG, fuel_frac=1.0)
+    assert r == pytest.approx(0.0)
+
+
+def test_near_miss_scores_half_the_failure_maximum():
+    """임계값 정확히 위에서 실패하면 절반을 받는다."""
+    s = CFG["success"]
+    near = at(x=0.0, y=25.0, vy=-s["v_max"])
+    r = terminal_reward(Outcome.CRASH, near, TARGET, CFG, fuel_frac=0.5)
+    assert r == pytest.approx(CFG["reward"]["failure_max"] * 0.5)
+
+
+def test_weakest_criterion_determines_the_failure_score():
+    """다섯 조건 중 가장 나쁜 것이 점수를 정한다.
+
+    성공하려면 전부 만족해야 하므로 부분 점수도 가장 약한 고리를 따른다.
+    평균을 쓰면 '속도만 빼고 완벽'이 높은 점수를 받아 자유낙하가 되살아난다.
+    """
+    s = CFG["success"]
+    good = at(x=0.0, y=25.0, vy=-1.0)
+    bad_speed = at(x=0.0, y=25.0, vy=-2.0 * s["v_max"])
+    assert terminal_reward(Outcome.CRASH, good, TARGET, CFG, fuel_frac=0.0) > 0.0
+    assert terminal_reward(Outcome.CRASH, bad_speed, TARGET, CFG,
+                           fuel_frac=0.0) == pytest.approx(0.0)
+
+
+def test_potential_penalises_speed():
+    """Φ 가 속도를 반영해야 밀집 신호가 성공 기준을 가리킨다."""
+    assert potential(at(vy=-40.0), TARGET, CFG) < potential(at(vy=-1.0), TARGET, CFG)
+
+
+def test_potential_wraps_the_attitude_angle():
+    """여러 바퀴 돌아도 Φ 가 무한정 작아지지 않는다.
+
+    물리는 θ 를 감지 않는데 관찰은 sin/cos 라 감김 횟수를 볼 수 없다.
+    보상만 그것에 의존하면 관찰로 구분 불가능한 두 상태가 다른 값을 갖는다.
+    """
+    assert potential(at(theta=0.1), TARGET, CFG) == pytest.approx(
+        potential(at(theta=0.1 + 2.0 * math.pi), TARGET, CFG))
+```
+
+- [ ] **Step 2: 테스트 실패 확인**
+
+```bash
+SDL_VIDEODRIVER=dummy uv run pytest tests/test_reward.py -v
+```
+
+기대: `TypeError` (인자 불일치) 및 새 테스트 실패.
+
+- [ ] **Step 3: `rocket_env/reward.py` 수정**
+
+모듈 상수와 헬퍼를 추가하고 `potential`·`terminal_reward`를 교체한다.
+`distance_to_target`은 삭제한다.
+
+```python
+POTENTIAL_DIST_SCALE = 300.0
+POTENTIAL_SPEED_SCALE = 50.0
+
+
+def _wrap_angle(theta: float) -> float:
+    """각도를 (-π, π] 로 접는다.
+
+    물리는 θ 를 감지 않으므로 여러 바퀴 돈 상태에서 |θ| 가 계속 커진다.
+    반면 관찰은 sin/cos 라 감김 횟수를 볼 수 없다. 보상만 그것에 의존하면
+    관찰로 구분할 수 없는 두 상태가 다른 값을 가져 비마르코프가 된다.
+    """
+    return (theta + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def _closeness(value: float, threshold: float) -> float:
+    """임계값의 2배 지점에서 0이 되는 선형 근접도.
+
+    임계값 자체에서 0.5 다. 부분 점수를 주되 '거의 성공'과 '한참 멀었음'을
+    뚜렷이 가르는 기울기를 만든다.
+    """
+    return min(max(1.0 - value / (2.0 * threshold), 0.0), 1.0)
+
+
+def potential(state: State, target: tuple[float, float], cfg: dict) -> float:
+    """Φ(s). 목표에 가깝고, 수직이고, 느릴수록 0에 가깝다. 항상 0 이하."""
+    r = cfg["reward"]
+    dx = abs(state.x - target[0]) / POTENTIAL_DIST_SCALE
+    dy = abs(state.y - target[1]) / POTENTIAL_DIST_SCALE
+    tilt = abs(_wrap_angle(state.theta)) / (math.pi / 2.0)
+    speed = math.hypot(state.vx, state.vy) / POTENTIAL_SPEED_SCALE
+    return -(r["shaping_w_dist"] * (dx + dy)
+             + r["shaping_w_attitude"] * tilt
+             + r["shaping_w_speed"] * speed)
+```
+
+`terminal_reward`는 시그니처에서 `d_initial`을 빼고 실패 분기를 교체한다.
+성공 분기는 그대로 둔다.
+
+```python
+def terminal_reward(outcome: str, state: State, target: tuple[float, float],
+                    cfg: dict, fuel_frac: float) -> float:
+    """종료 시 한 번 지급되는 보상."""
+    r = cfg["reward"]
+    s = cfg["success"]
+
+    if outcome == Outcome.SUCCESS:
+        ...  # 기존 성공 분기를 그대로 유지 (s 는 위에서 이미 꺼냈다)
+
+    if outcome in _FAILURE_OUTCOMES:
+        speed = math.hypot(state.vx, state.vy)
+        # 성공은 다섯 조건을 모두 만족해야 한다. 실패 점수도 가장 약한
+        # 고리가 정한다 — 평균을 쓰면 "속도만 빼고 완벽"이 높은 점수를
+        # 받아, 중력이 공짜로 만들어 주는 자유낙하 고득점이 되살아난다.
+        return r["failure_max"] * min(
+            _closeness(abs(state.x - target[0]), s["zone_r"]),
+            _closeness(abs(state.y - target[1]), s["zone_r"]),
+            _closeness(speed, s["v_max"]),
+            _closeness(abs(_wrap_angle(state.theta)),
+                       math.radians(s["theta_max_deg"])),
+            _closeness(abs(state.omega), math.radians(s["omega_max_deg"])),
+        )
+
+    raise ValueError(f"종료 보상을 계산할 수 없는 outcome: {outcome!r}")
+```
+
+- [ ] **Step 4: `rocket_env/config.py`에 `shaping_w_speed` 추가**
+
+`DEFAULT_CONFIG["reward"]`의 `shaping_w_attitude` 다음 줄에 넣는다.
+
+```python
+        "shaping_w_attitude": 0.5,
+        "shaping_w_speed": 0.5,
+```
+
+- [ ] **Step 5: `rocket_env/env.py`에서 `d_initial` 제거**
+
+`distance_to_target` import를 지우고, `reset()`의 `self._d_initial = ...` 줄과
+`__init__`의 초기화를 지우고, `step()`의 호출을 바꾼다.
+
+```python
+            reward += terminal_reward(outcome, cur, self._target, self.cfg,
+                                      self._fuel_frac())
+```
+
+- [ ] **Step 6: `SHAPING_BOUND` 재계산**
+
+`tests/test_exploit_regression.py`의 상수를 `4.0`으로 올리고 주석의 프리셋별
+표를 갱신한다. 속도 항이 들어가 `-Φ(s₀)`가 커졌다 — `landing-hard`가
+`2.083(거리) + 0.472(자세) + 0.700(속도) = 3.256`으로 최대다.
+`test_shaping_bound_covers_every_preset_initial_state`가 실제 값을 검증하므로
+계산이 틀렸으면 그 테스트가 알려준다.
+
+- [ ] **Step 7: 테스트 통과 확인**
+
+```bash
+SDL_VIDEODRIVER=dummy uv run pytest -v
+```
+
+`tests/test_exploit_regression.py`를 특히 주시한다. 실패 점수가 크게 낮아지므로
+`test_failure_returns_stay_under_the_failure_ceiling`은 여유가 더 커지고,
+`test_loitering_does_not_out_score_descending`과
+`test_shorter_episodes_do_not_earn_more_than_longer_ones`는 값이 바뀌지만
+부등식은 유지되어야 한다. **깨지면 상수를 조정하지 말고 보고한다.**
+
+- [ ] **Step 8: 커밋**
+
+```bash
+git add rocket_env/ tests/
+git commit -m "fix: 실패 점수를 성공 조건 근접도로 교체하고 Φ에 속도 항 추가"
+```
+
+- [ ] **Step 9: 베이스라인 측정 스크립트 작성**
+
+`scripts/measure_baseline.py`:
+
+```python
+"""프리셋별 베이스라인 측정.
+
+등급 컷을 눈감고 정하지 않기 위한 도구다. 무행동 정책과 학습된 DQN 의
+점수 분포를 나란히 재서 결과를 기록한다.
+
+이 스크립트가 있어야 하는 이유는 단순하다 — 모든 정책이 같은 점수를 받는
+환경도 모든 테스트를 통과한다. 변별력은 재봐야 안다.
+
+사용:
+    uv run python scripts/measure_baseline.py --preset landing-easy --steps 100000
+"""
+
+import argparse
+import statistics
+
+import gymnasium as gym
+import numpy as np
+
+import rocket_env  # noqa: F401
+from rocket_env.config import PRESETS
+
+NOOP = 1
+EVAL_SEEDS = range(40)
+
+
+def evaluate(env, act) -> tuple[float, float]:
+    """(평균 점수, 성공률)."""
+    scores, wins = [], 0
+    for seed in EVAL_SEEDS:
+        obs, _ = env.reset(seed=10_000 + seed)
+        done = truncated = False
+        total = 0.0
+        info = {}
+        while not (done or truncated):
+            obs, reward, done, truncated, info = env.step(act(obs))
+            total += float(reward)
+        scores.append(total)
+        wins += int(info["is_success"])
+    return statistics.mean(scores), wins / len(EVAL_SEEDS)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--preset", default="landing-easy", choices=list(PRESETS))
+    parser.add_argument("--steps", type=int, default=100_000)
+    parser.add_argument("--lr", type=float, default=6e-4)
+    args = parser.parse_args()
+
+    env = gym.make("rocket-v0", config=PRESETS[args.preset])
+
+    noop_score, noop_rate = evaluate(env, lambda _obs: NOOP)
+    rng = np.random.default_rng(0)
+    rand_score, rand_rate = evaluate(
+        env, lambda _obs: int(rng.integers(env.action_space.n)))
+
+    from stable_baselines3 import DQN
+
+    model = DQN("MlpPolicy", env, verbose=0, device="cpu",
+                learning_rate=args.lr, buffer_size=200_000,
+                learning_starts=5_000, policy_kwargs={"net_arch": [256, 256]})
+    model.learn(total_timesteps=args.steps)
+    dqn_score, dqn_rate = evaluate(
+        env, lambda obs: int(model.predict(obs, deterministic=True)[0]))
+
+    print(f"preset={args.preset} steps={args.steps} lr={args.lr}")
+    print(f"  no-op   score={noop_score:8.2f}  success={noop_rate:6.1%}")
+    print(f"  random  score={rand_score:8.2f}  success={rand_rate:6.1%}")
+    print(f"  DQN     score={dqn_score:8.2f}  success={dqn_rate:6.1%}")
+    print(f"  separation (DQN - no-op) = {dqn_score - noop_score:+.2f}")
+    env.close()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+- [ ] **Step 10: `landing-easy`에서 측정하고 결과를 그대로 보고**
+
+```bash
+uv run python scripts/measure_baseline.py --preset landing-easy --steps 100000
+```
+
+**판단하지 말고 숫자를 그대로 보고한다.** DQN 이 무행동을 유의미하게
+(성공률 > 0, 점수 차 +20 이상) 앞서면 재설계가 통한 것이고, 여전히 붙어
+있으면 프리셋 난이도 조정이 추가로 필요하다는 뜻이다. 어느 쪽이든 다음
+결정의 입력이다.
+
+- [ ] **Step 11: 커밋**
+
+```bash
+git add scripts/measure_baseline.py
+git commit -m "feat: 베이스라인 측정 스크립트"
+```
+
+---
+
+### Task 12: 제어 난이도 완화 — 노즐 슬루율과 1단계 프리셋
+
+**배경.** Task 11 이 보상을 정직하게 만들었다 — 무행동 점수가 36.6에서 1.24로
+붕괴했고 자유낙하 꼼수가 사라졌다. 그러나 DQN 은 여전히 성공률 0%다. 이제
+남은 것은 **제어 문제 자체의 난이도**다.
+
+두 가지가 겹쳐 있다.
+
+1. **삼중 적분기**: 행동 → 노즐 각속도 → φ → α → ω → θ. 노즐이 30°/s 라
+   φ 를 한계(20°)까지 돌리는 데 0.67 초, 13 스텝이 걸린다. 자세를 고치려는
+   행동의 효과가 13 스텝 뒤에 나타나니 크레딧 할당이 극도로 어렵다.
+2. **`landing-easy` 가 1단계가 아니다**: 초기 자세가 ±15°인데 성공 임계가
+   ±10°다. 즉 **첫 라운드부터 자세 보정이 필수**다. 학생이 "속도 줄이기"와
+   "자세 잡기"를 동시에 배워야 한다.
+
+**Files:**
+- Modify: `rocket_env/physics.py`, `rocket_env/config.py`
+- Modify: `tests/test_physics.py`
+- Modify: `README.md`, `docs/superpowers/specs/2026-07-21-rocket-env-design.md`
+
+- [ ] **Step 1: 노즐 각속도를 120°/s 로**
+
+`rocket_env/physics.py`:
+
+```python
+# 노즐 슬루율. 30°/s 로는 한계각까지 0.67 초(13 스텝)가 걸려, 자세 보정
+# 행동의 효과가 13 스텝 뒤에 나타난다. 크레딧 할당이 사실상 불가능해
+# DQN 이 학습하지 못했다. 120°/s 면 0.17 초다 — 적분기 구조는 그대로 두되
+# 지연만 4배 줄인다.
+NOZZLE_RATES = (-math.radians(120.0), 0.0, math.radians(120.0))
+```
+
+- [ ] **Step 2: 행동 테이블 테스트 갱신**
+
+`tests/test_physics.py::test_action_table_has_12_entries_in_thrust_major_order`
+의 각도 상수를 30 → 120 으로 바꾼다.
+
+```python
+    assert ACTION_TABLE[0] == (0.0, -math.radians(120.0))
+    assert ACTION_TABLE[11] == (2.0 * G, math.radians(120.0))
+```
+
+- [ ] **Step 3: `landing-easy` 를 진짜 1단계로**
+
+`rocket_env/config.py` 의 `PRESETS["landing-easy"]`:
+
+```python
+    "landing-easy": {
+        "task": "landing",
+        "wind": {"mode": "none", "max_speed": 0.0},
+        "fuel": {"capacity": None},
+        # 초기 자세를 성공 임계(±10°) 안쪽으로 잡는다. 1단계에서는 자세
+        # 보정 없이 "내려오는 속도 줄이기"만 배우면 되게 한다. 고도와
+        # 초기 하강속도도 낮춰 에피소드를 짧게 만든다.
+        "init": {"y": 200.0, "vy_range": [-20.0, -20.0],
+                 "x_range": [-50.0, 50.0], "theta_range_deg": [-5.0, 5.0]},
+    },
+```
+
+- [ ] **Step 4: 전체 테스트**
+
+```bash
+SDL_VIDEODRIVER=dummy uv run pytest -v
+```
+
+`test_shaping_bound_covers_every_preset_initial_state` 가 `landing-easy` 의
+`-Φ(s₀)` 감소를 자동으로 확인한다. exploit 회귀 테스트의 부등식이 깨지면
+**상수를 만지지 말고 보고한다.**
+
+- [ ] **Step 5: 문서 갱신**
+
+`README.md` 의 행동 공간 설명(`{-30, 0, +30} deg/s`)과 스펙 6절의 같은 값을
+120 으로 고친다. 스펙 9절 프리셋 표의 `landing-easy` 행도 갱신한다.
+
+- [ ] **Step 6: 커밋**
+
+```bash
+git add rocket_env/ tests/ README.md docs/
+git commit -m "fix: 노즐 슬루율 120deg/s, landing-easy를 자세 보정 불필요 수준으로"
+```
+
+- [ ] **Step 7: 재측정**
+
+```bash
+uv run python scripts/measure_baseline.py --preset landing-easy --steps 100000
+```
+
+**판단하지 말고 숫자를 그대로 보고한다.** 이어서 `landing-normal` 도 같은
+예산으로 측정해 난이도 사다리가 실제로 존재하는지 확인한다.
+
+```bash
+uv run python scripts/measure_baseline.py --preset landing-normal --steps 100000
+```
+
+---
+
+### Task 13: 타임아웃은 0점 — 맴돌기 꼼수 차단
+
+**배경.** Task 12 가 `landing-easy` 의 초기 고도를 200 m 로 낮추자
+`test_loitering_does_not_out_score_descending` 이 12 시드 전부에서 깨졌다.
+1.0g 정지 추력 정책이 착륙 지점 근처 상태로 수렴한 채 타임아웃하면서,
+근접도 공식에서 6.74 점을 받았다 — 추락한 무추력 정책(0.38)보다 높다.
+
+원인은 `TIMEOUT` 을 다른 실패와 같은 공식으로 채점한 것이다. 추락은
+"착륙을 시도하다 실패"지만 타임아웃은 "시도조차 하지 않음"이다. 근접도로
+채점하면 **안전하게 맴도는 것이 위험을 감수하고 착륙을 시도하는 것보다
+높은 점수**를 받고, 최적 전략은 "절대 착륙하지 않기"가 된다.
+
+**Files:** `rocket_env/reward.py`, `tests/test_reward.py`
+
+- [ ] **Step 1: 실패하는 테스트 작성**
+
+`tests/test_reward.py` 의 `test_all_failure_outcomes_share_the_same_formula`
+를 아래 두 테스트로 교체한다.
+
+```python
+def test_contact_failures_share_the_same_formula():
+    """접지·포획실패·연료소진은 같은 공식을 쓴다."""
+    state = at(x=10.0, y=100.0)
+    scores = [terminal_reward(o, state, TARGET, CFG, fuel_frac=0.5)
+              for o in (Outcome.CRASH, Outcome.MISSED, Outcome.OUT_OF_FUEL)]
+    assert len(set(scores)) == 1
+    assert 0.0 <= scores[0] <= CFG["reward"]["failure_max"]
+
+
+def test_timeout_scores_zero_even_in_a_near_perfect_state():
+    """시도하지 않으면 0점이다.
+
+    목표 바로 위에서 거의 멈춘 상태라도 착륙하지 않았으면 0점이다.
+    맴도는 쪽이 착륙을 시도하다 실패하는 쪽보다 높은 점수를 받으면
+    최적 전략이 '절대 착륙하지 않기'가 되기 때문이다. 실제로
+    landing-easy 의 고도를 낮추자 1.0g 정지 추력 정책이 정확히 그
+    상태로 수렴했다.
+    """
+    almost = at(x=0.0, y=26.0, vx=0.0, vy=-0.5)
+    assert terminal_reward(Outcome.TIMEOUT, almost, TARGET, CFG,
+                           fuel_frac=1.0) == 0.0
+```
+
+- [ ] **Step 2: 테스트 실패 확인**
+
+```bash
+SDL_VIDEODRIVER=dummy uv run pytest tests/test_reward.py -v
+```
+
+- [ ] **Step 3: `rocket_env/reward.py` 수정**
+
+`_FAILURE_OUTCOMES` 를 접지 계열만 담도록 좁히고, 타임아웃 분기를 앞에 둔다.
+
+```python
+# 판정 지점에 실제로 도달한 실패. 부분 점수를 받는다.
+_CONTACT_FAILURES = frozenset({
+    Outcome.CRASH, Outcome.MISSED, Outcome.OUT_OF_FUEL,
+})
+```
+
+`terminal_reward` 의 실패 처리 앞에 추가한다.
+
+```python
+    if outcome == Outcome.TIMEOUT:
+        # 시간이 다 되도록 판정 지점에 가지 않았다면 시도 자체를 하지 않은
+        # 것이다. 목표 근처에서 맴도는 쪽이 착륙을 시도하다 실패하는 쪽보다
+        # 높은 점수를 받으면, 최적 전략은 "절대 착륙하지 않기"가 된다.
+        return 0.0
+```
+
+그리고 근접도 분기의 조건을 `if outcome in _CONTACT_FAILURES:` 로 바꾼다.
+
+- [ ] **Step 4: 전체 테스트**
+
+```bash
+SDL_VIDEODRIVER=dummy uv run pytest -v
+```
+
+`test_loitering_does_not_out_score_descending` 이 통과해야 한다. 다른
+exploit 회귀 테스트가 새로 깨지면 **상수를 만지지 말고 보고한다.**
+
+- [ ] **Step 5: 커밋**
+
+```bash
+git add rocket_env/ tests/
+git commit -m "fix: 타임아웃은 0점 — 맴돌기가 착륙 시도를 이기지 못하게"
+```
+
+---
+
+### Task 14: 난이도 사다리 재설계 — 라운드마다 축 하나씩
+
+**배경.** 100만 스텝 측정에서 `landing-easy` 12.5%, `landing-normal` 2.5%가
+나왔다. 사다리가 절벽인 이유는 두 프리셋 사이에서 **난이도 축을 여섯 개
+동시에** 올렸기 때문이다: 자세 ±5°→±45°, 고도 200→450, 하강속도 −20→−50,
+수평 ±50→±150, 바람 없음→8 m/s, 연료 무한→120.
+
+라운드마다 축을 하나씩만 올리면 학생은 무엇이 새로 어려워졌는지 알고,
+조교는 어느 축에서 막히는지 진단할 수 있다.
+
+**Files:** `rocket_env/config.py`, 모든 테스트 파일, `README.md`, 스펙 9절
+
+- [ ] **Step 1: `PRESETS` 교체**
+
+```python
+PRESETS: dict[str, dict[str, Any]] = {
+    # 라운드마다 난이도 축을 하나씩만 추가한다. 여러 축을 동시에 올리면
+    # 학생은 무엇이 새로 어려워졌는지 모르고, 조교는 어디서 막히는지
+    # 진단할 수 없다.
+    "landing-basic": {
+        "task": "landing",
+        "wind": {"mode": "none", "max_speed": 0.0},
+        "fuel": {"capacity": None},
+        "init": {"y": 200.0, "vy_range": [-20.0, -20.0],
+                 "x_range": [-50.0, 50.0], "theta_range_deg": [-5.0, 5.0]},
+    },
+    # + 자세 보정: 초기 기울기가 성공 임계(±10°)를 벗어난다.
+    "landing-attitude": {
+        "task": "landing",
+        "wind": {"mode": "none", "max_speed": 0.0},
+        "fuel": {"capacity": None},
+        "init": {"y": 200.0, "vy_range": [-20.0, -20.0],
+                 "x_range": [-50.0, 50.0], "theta_range_deg": [-30.0, 30.0]},
+    },
+    # + 고속 진입: 고도와 초기 하강속도가 올라간다.
+    "landing-descent": {
+        "task": "landing",
+        "wind": {"mode": "none", "max_speed": 0.0},
+        "fuel": {"capacity": None},
+        "init": {"y": 450.0, "vy_range": [-50.0, -40.0],
+                 "x_range": [-50.0, 50.0], "theta_range_deg": [-30.0, 30.0]},
+    },
+    # + 외란: 에피소드 내내 일정한 옆바람.
+    "landing-wind": {
+        "task": "landing",
+        "wind": {"mode": "constant", "max_speed": 8.0},
+        "fuel": {"capacity": None},
+        "init": {"y": 450.0, "vy_range": [-50.0, -40.0],
+                 "x_range": [-50.0, 50.0], "theta_range_deg": [-30.0, 30.0]},
+    },
+    # + 불확실성과 자원: 돌풍이 되고 연료가 유한해진다. 이 라운드만 축이
+    #   둘인데, 둘 다 "예측할 수 없는 조건에서 버티기"라는 한 주제다.
+    "landing-gust": {
+        "task": "landing",
+        "wind": {"mode": "gust", "max_speed": 12.0,
+                 "ou_theta": 0.15, "ou_sigma": 3.0},
+        "fuel": {"capacity": 120.0},
+        "init": {"y": 450.0, "vy_range": [-50.0, -40.0],
+                 "x_range": [-50.0, 50.0], "theta_range_deg": [-30.0, 30.0]},
+    },
+    # + 정밀 포획: 지면 대신 발사탑 팔 높이를 통과해야 한다.
+    "catch": {
+        "task": "catch",
+        "wind": {"mode": "constant", "max_speed": 5.0},
+        "fuel": {"capacity": 140.0},
+        "init": {"y": 450.0, "vy_range": [-50.0, -40.0],
+                 "x_range": [-50.0, 50.0], "theta_range_deg": [-30.0, 30.0]},
+    },
+}
+```
+
+- [ ] **Step 2: 테스트의 프리셋 이름 치환**
+
+옛 이름 → 새 이름 대응. 의미가 가장 가까운 것으로 옮긴다.
+
+| 옛 이름 | 새 이름 |
+|---------|---------|
+| `landing-easy` | `landing-basic` |
+| `landing-normal` | `landing-descent` |
+| `landing-hard` | `landing-gust` |
+| `catch-normal` | `catch` |
+| `catch-hard` | `catch` |
+
+`tests/test_config.py::test_preset_literal_values`의 파라미터 표는 새 값에
+맞춰 다시 쓴다.
+
+```python
+@pytest.mark.parametrize("name,path,expected", [
+    ("landing-basic", ("wind", "max_speed"), 0.0),
+    ("landing-basic", ("fuel", "capacity"), None),
+    ("landing-basic", ("init", "y"), 200.0),
+    ("landing-attitude", ("init", "theta_range_deg"), [-30.0, 30.0]),
+    ("landing-attitude", ("init", "y"), 200.0),
+    ("landing-descent", ("init", "y"), 450.0),
+    ("landing-descent", ("wind", "max_speed"), 0.0),
+    ("landing-wind", ("wind", "mode"), "constant"),
+    ("landing-wind", ("wind", "max_speed"), 8.0),
+    ("landing-gust", ("wind", "ou_sigma"), 3.0),
+    ("landing-gust", ("fuel", "capacity"), 120.0),
+    ("catch", ("success", "zone_r"), 6.0),
+    ("catch", ("reward", "w_speed"), 60.0),
+])
+```
+
+- [ ] **Step 3: 전체 테스트**
+
+```bash
+SDL_VIDEODRIVER=dummy uv run pytest -v
+```
+
+exploit 회귀 테스트가 새 프리셋 전부에서 돌아간다. **깨지면 상수를 만지지
+말고 보고한다.**
+
+- [ ] **Step 4: 문서 갱신**
+
+`README.md`의 프리셋 목록과 스펙 9절 프리셋 표를 새 6개로 교체한다.
+
+- [ ] **Step 5: 커밋**
+
+- [ ] **Step 6: 6개 프리셋 전수 측정 (100만 스텝)**
+
+```bash
+for p in landing-basic landing-attitude landing-descent landing-wind landing-gust catch; do
+  uv run python scripts/measure_baseline.py --preset "$p" --steps 1000000
+done
+```
+
+결과를 `docs/baselines.md`에 표로 추가한다. **숫자를 판단하거나 조정하지
+말고 그대로 기록한다.**
+
+---
+
+### Task 15: 최종 리뷰 잔여 항목 정리
+
+전체 브랜치 리뷰가 남긴 Important 2건과 Minor 3건, 그리고 스펙-코드 드리프트를
+정리한다. 보상·물리는 건드리지 않는다.
+
+**Files:** `rocket_env/config.py`, `tests/test_config.py`, `tests/test_sb3_smoke.py`,
+`docs/superpowers/specs/2026-07-21-rocket-env-design.md`
+
+- [ ] **Step 1: `wind.mode` 를 실제 동작에 반영** (Important)
+
+`WindProcess` 는 분기 없는 단일 수식이라 `mode` 를 읽지 않는다. 그래서
+`{"wind": {"mode": "none"}}` 만 넘기면 `max_speed` 기본값 8.0 이 남아 바람이
+분다. 학생은 무풍에서 디버깅한다고 믿으며 8 m/s 에서 학습하고, 조교는 돌풍
+라운드를 만들었다고 믿으며 상수 바람으로 채점한다. 조용해서 아무도 모른다.
+
+`rocket_env/config.py` 에 추가하고 `build_config` 의 병합 직후·`_validate_ranges`
+직전에 호출한다.
+
+```python
+def _normalize_wind(cfg: dict) -> None:
+    """mode 가 실제 동작을 결정하도록 동반 값을 맞춘다.
+
+    WindProcess 는 mode 를 읽지 않고 max_speed/ou_theta/ou_sigma 만 본다.
+    여기서 맞춰주지 않으면 mode 는 장식일 뿐이고, 오설정이 조용히 통과한다.
+    """
+    wind = cfg["wind"]
+    if wind["mode"] == "none":
+        wind["max_speed"] = 0.0
+        wind["ou_theta"] = 0.0
+        wind["ou_sigma"] = 0.0
+    elif wind["mode"] == "constant":
+        wind["ou_theta"] = 0.0
+        wind["ou_sigma"] = 0.0
+    elif wind["mode"] == "gust" and wind["ou_sigma"] <= 0.0:
+        raise ConfigError(
+            "wind.mode='gust' 인데 ou_sigma 가 0 이하입니다 — 돌풍이 아니라 "
+            f"상수 바람이 됩니다: ou_sigma={wind['ou_sigma']}"
+        )
+```
+
+테스트:
+
+```python
+def test_wind_mode_none_forces_zero_wind():
+    """max_speed 를 함께 지정하지 않아도 mode 만으로 무풍이 되어야 한다."""
+    cfg = build_config({"wind": {"mode": "none"}})
+    assert cfg["wind"]["max_speed"] == 0.0
+
+
+def test_wind_mode_constant_clears_the_ou_terms():
+    cfg = build_config({"wind": {"mode": "constant", "max_speed": 5.0,
+                                 "ou_sigma": 3.0}})
+    assert cfg["wind"]["ou_sigma"] == 0.0
+
+
+def test_gust_without_sigma_raises_config_error():
+    with pytest.raises(ConfigError, match="ou_sigma"):
+        build_config({"wind": {"mode": "gust", "max_speed": 10.0}})
+```
+
+- [ ] **Step 2: `init.*` 와 `catch.*` 검증** (Minor)
+
+`init.y = 900` 이 지금은 통과해 1스텝 에피소드가 되고, `vy_range` 에 스칼라를
+넣으면 NumPy 가 날것의 `TypeError` 를 던진다.
+
+`rocket_env/config.py` 상단에 물리 상수를 import 한다 (physics 는 config 를
+import 하지 않으므로 순환이 없다).
+
+```python
+from rocket_env.physics import ROCKET_HEIGHT, WORLD_X_MAX, WORLD_X_MIN, WORLD_Y_MAX
+```
+
+`_validate_ranges` 에 추가한다.
+
+```python
+    ground = ROCKET_HEIGHT / 2.0
+    ceiling = WORLD_Y_MAX - ROCKET_HEIGHT / 2.0
+
+    init = cfg["init"]
+    if not ground < init["y"] < ceiling:
+        raise ConfigError(
+            f"init.y는 {ground}와 {ceiling} 사이여야 합니다: {init['y']}")
+    for key in ("x_range", "vy_range", "theta_range_deg"):
+        pair = init[key]
+        if not (isinstance(pair, (list, tuple)) and len(pair) == 2
+                and pair[0] <= pair[1]):
+            raise ConfigError(
+                f"init.{key}는 [최솟값, 최댓값] 2원소여야 합니다: {pair!r}")
+    if not (WORLD_X_MIN < init["x_range"][0]
+            and init["x_range"][1] < WORLD_X_MAX):
+        raise ConfigError(f"init.x_range가 세계 경계를 벗어납니다: {init['x_range']}")
+    if not ground < cfg["catch"]["y_arm"] < ceiling:
+        raise ConfigError(
+            f"catch.y_arm은 {ground}와 {ceiling} 사이여야 합니다: "
+            f"{cfg['catch']['y_arm']}")
+```
+
+테스트: `init.y = 900`, `vy_range = -50.0`(스칼라), `x_range = [-400, 400]`,
+`catch.y_arm = 900` 각각 `ConfigError` 를 내는지 확인한다. 여섯 프리셋이
+모두 여전히 빌드되는지도 확인한다.
+
+- [ ] **Step 3: `_reject_unknown_keys` 에 형태 검사 추가** (Minor)
+
+지금은 키 이름만 본다. `{"max_steps": "800"}` 이나 `{"seed": {"typo": 1}}` 이
+통과해 나중에 날것의 `TypeError` 로 터진다.
+
+```python
+def _kind(value) -> str:
+    if isinstance(value, dict):
+        return "dict"
+    if isinstance(value, (list, tuple)):
+        return "list"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, str):
+        return "str"
+    return "none"
+```
+
+`_reject_unknown_keys` 의 키 검사 다음에 넣는다. 스키마 값이 `None` 인 키
+(`seed`, `fuel.capacity` 는 기본이 숫자지만 `None` 허용)는 예외로 둔다.
+
+```python
+        expected = schema[key]
+        if _kind(expected) != "none" and _kind(value) not in (_kind(expected), "none"):
+            raise ConfigError(
+                f"{full!r} 의 형태가 스키마와 다릅니다: "
+                f"{_kind(value)} (스키마는 {_kind(expected)})")
+```
+
+테스트: `{"max_steps": "800"}` 과 `{"seed": {"typo": 1}}` 이 `ConfigError` 를
+내는지, `{"fuel": {"capacity": None}}` 은 여전히 통과하는지 확인한다.
+
+- [ ] **Step 4: 채점 경로 테스트** (Important)
+
+`tests/test_sb3_smoke.py` 의 두 테스트를 하나로 합친다. 지금은 `predict()` 를
+한 번만 호출하고, 전체 에피소드는 무작위 행동으로 돌린다. 서버 워커가 실제로
+쓰는 조합 — 저장된 모델을 불러와 `predict()` 출력을 그대로 `step()` 에 넣고
+점수를 누적 — 은 아무도 시험하지 않는다. `int(np.array([5]))` 는 NumPy 2.x 에서
+`TypeError` 라, `predict` 반환 형태가 바뀌면 전 학생의 제출이 채점 시점에 깨진다.
+
+```python
+@pytest.mark.slow
+def test_saved_model_drives_the_full_grading_loop(tmp_path):
+    """서버 워커가 실제로 밟는 경로를 그대로 시험한다.
+
+    저장 → 로드 → predict() 출력을 그대로 step() 에 전달 → 점수 누적.
+    """
+    env = gym.make("rocket-v0", render_mode="rgb_array",
+                   config=PRESETS["landing-basic"])
+    model = DQN("MlpPolicy", env, verbose=0, device="cpu", seed=0,
+                learning_starts=200, buffer_size=5_000,
+                policy_kwargs={"net_arch": [64, 64]})
+    model.learn(total_timesteps=2_000)
+    path = tmp_path / "model.zip"
+    model.save(path)
+    loaded = DQN.load(path, env=env, device="cpu")
+
+    scores, outcomes = [], []
+    for i in range(2):
+        obs, _ = env.reset(seed=1000 + i)
+        done = truncated = False
+        score = 0.0
+        info = {}
+        while not (done or truncated):
+            action, _ = loaded.predict(obs, deterministic=True)
+            obs, reward, done, truncated, info = env.step(action)
+            score += float(reward)
+        assert math.isfinite(score)
+        scores.append(score)
+        outcomes.append(bool(info["is_success"]))
+
+    assert len(scores) == 2
+    assert all(isinstance(o, bool) for o in outcomes)
+    env.close()
+```
+
+기존 `test_dqn_trains_and_predicts_without_error` 와
+`test_server_evaluation_loop_shape_works` 는 이것으로 대체한다.
+
+- [ ] **Step 5: 전체 테스트**
+
+```bash
+SDL_VIDEODRIVER=dummy uv run pytest -v
+```
+
+- [ ] **Step 6: 스펙을 코드에 맞춘다**
+
+`docs/superpowers/specs/2026-07-21-rocket-env-design.md` 에서 코드와 어긋난
+곳을 고친다. **코드가 옳고 스펙이 낡았다.**
+
+- 4절 파일 트리에 `types.py`, `reward.py`, `tasks/__init__.py` 추가
+- 6절 노즐 각속도 `±30°/s` → `±120°/s`
+- 7절 경계 이탈 조건 `|x| > 300` → `|x| >= 300`
+- 7절 `outcome` 우선순위: 실제 코드는 `CRASH` 만 `OUT_OF_FUEL` 로 승격한다
+  (`TIMEOUT` 을 승격하면 `truncated` 의미가 깨지므로 코드가 옳다)
+- 8절: 실패 보상이 `max(d_initial, 1.0)` 진행도가 아니라 **성공 조건 근접도의
+  최솟값**임을 반영. `TIMEOUT` 은 0점임을 명시
+- 8절 Φ 범위: 속도 항과 θ 래핑이 들어갔으므로 `SHAPING_BOUND = 4.0` 과
+  프리셋별 `-Φ(s₀)` 표로 갱신
+- 9절 프리셋 표를 6라운드 사다리로 교체
+- 10절: 궤적은 페이드하지 않고 400점으로 잘린다, HUD 는 게이지·화살표가
+  아니라 텍스트다 — 실제 구현에 맞춰 서술 수정
+- 11절 테스트 8번: 실제로는 수치 오라클이 없다는 점을 반영
+- 12절에 `info["fuel_left"]` 가 무한 연료에서 `inf` 라 JSON 비표준이라는
+  점을 SDK/리더보드 스펙에서 다룰 항목으로 명시
+
+- [ ] **Step 7: 커밋**
+
+---
+
+### Task 16: 개루프 정책 차단 — 초기 각속도와 판정 일관성
+
+**배경.** 최종 리뷰가 Critical 을 찾았다. 행동 `[7,7,7,1]` 반복(관찰을 전혀
+읽지 않음)이 `landing-basic` 에서 **165.92점 / 87.5% 성공**으로, 측정된 최고
+DQN 시드(159.30 / 87.5%)를 이긴다.
+
+세 선물이 겹쳤다. (1) 노즐 중앙 행동은 각속도가 0이라 `phi ≡ 0 → alpha ≡ 0`,
+즉 **θ 가 절대 변하지 않는다.** 그리고 `landing-basic` 의 θ₀ 범위 ±5°가 성공
+임계 ±10° 안쪽이라 **자세는 무조건 합격이고 잃을 수도 없다.** (2) `x_range`
+±50 이 `zone_r` 50 과 같다. (3) 듀티 `d` 의 종단속도가 `(1-d)·49.5` 라
+`d=0.75` 에서 12.4 m/s < `v_max` 15 — 개루프 끌개가 있다.
+
+**핵심 해법은 초기 각속도다.** `phi ≡ 0` 이면 `alpha ≡ 0` 이므로 ω 는 초기값이
+영원히 유지된다. 따라서 **|ω₀| 를 항상 성공 임계 밖에 두면, 짐벌을 쓰지 않는
+정책은 어떤 라운드에서도 구조적으로 0% 다.** 물리적으로도 자연스럽다 —
+귀환하는 부스터는 약간 텀블링한다.
+
+**Files:** `rocket_env/config.py`, `rocket_env/tasks/base.py`,
+`rocket_env/reward.py`, `tests/`, `README.md`, `docs/baselines.md`
+
+- [ ] **Step 1: 초기 각속도 추가**
+
+`DEFAULT_CONFIG["init"]` 에 넣는다.
+
+```python
+        # 초기 각속도의 크기 범위(deg/s). 부호는 매 에피소드 무작위.
+        # 항상 성공 임계(omega_max_deg)보다 크게 잡는다 — 노즐을 쓰지 않는
+        # 정책은 alpha ≡ 0 이라 ω 를 영원히 못 줄이므로, 이 한 줄이
+        # "관찰을 읽지 않는 개루프 정책"을 모든 라운드에서 0%로 만든다.
+        "omega_abs_range_deg": [12.0, 20.0],
+```
+
+`rocket_env/tasks/base.py` 의 `sample_initial_state` 에서 샘플링한다.
+
+```python
+    omega_deg = rng.uniform(*init["omega_abs_range_deg"])
+    if rng.random() < 0.5:
+        omega_deg = -omega_deg
+```
+
+그리고 `State(...)` 의 `omega=0.0` 을 `omega=math.radians(omega_deg)` 로 바꾼다.
+
+- [ ] **Step 2: `landing-basic` 의 수평 여유 제거**
+
+`x_range` 를 `zone_r`(50)보다 넓게 잡아 수평 제어도 필요하게 만든다.
+
+```python
+        "init": {"y": 200.0, "vy_range": [-20.0, -20.0],
+                 "x_range": [-80.0, 80.0], "theta_range_deg": [-5.0, 5.0],
+                 "omega_abs_range_deg": [12.0, 20.0]},
+```
+
+나머지 다섯 프리셋은 `omega_abs_range_deg` 를 명시하지 않고 기본값을 쓴다.
+
+- [ ] **Step 3: 개루프 정책 회귀 테스트** (가장 중요)
+
+`tests/test_exploit_regression.py` 에 추가한다. 기존 테스트는 **상수** 행동
+12개만 보고, 교대 정책은 "실패 상한이 커버한다"며 제외했다. 그 논증은 맞지만
+무관하다 — 실패 상한은 *실패하는* 에피소드를 묶는데, 이 정책은 **성공**하므로
+상한이 발동하지 않는다. 점수가 아니라 **성공률**에 상한을 걸어야 한다.
+
+```python
+OPEN_LOOP_DUTIES = (0.5, 0.6, 0.7, 0.74, 0.75, 0.8, 0.9)
+OPEN_LOOP_PHASES = (0, 1, 2, 3)
+
+
+def open_loop_policy(duty: float, phase: int, period: int = 20):
+    """관찰을 읽지 않고 추력을 주기적으로 켜고 끄는 정책."""
+    on = max(1, round(duty * period))
+
+    def act(step: int) -> int:
+        return HOVER if (step + phase) % period < on else NOOP
+
+    return act
+
+
+@pytest.mark.parametrize("preset", list(PRESETS))
+def test_open_loop_policies_cannot_pass_any_round(preset):
+    """관찰을 무시하는 정책은 어느 라운드도 통과하지 못해야 한다.
+
+    노즐을 쓰지 않으면 alpha ≡ 0 이라 ω 가 초기값 그대로 유지된다.
+    |ω₀| 를 성공 임계 밖에 두었으므로 이런 정책은 구조적으로 성공할 수 없다.
+
+    점수 상한이 아니라 성공률로 단언하는 이유: 실패 상한은 실패하는
+    에피소드만 묶는다. 성공하는 꼼수는 그 상한을 아예 건드리지 않는다.
+    """
+    for duty in OPEN_LOOP_DUTIES:
+        for phase in OPEN_LOOP_PHASES:
+            act = open_loop_policy(duty, phase)
+            wins = 0
+            for seed in SEEDS:
+                env = RocketEnv(config=PRESETS[preset])
+                env.reset(seed=seed)
+                step = 0
+                while True:
+                    _, _, terminated, truncated, info = env.step(act(step))
+                    step += 1
+                    if terminated or truncated:
+                        break
+                wins += int(info["is_success"])
+                env.close()
+            assert wins == 0, (
+                f"{preset} duty={duty} phase={phase}: {wins}/{len(SEEDS)} 성공")
+```
+
+- [ ] **Step 4: 성공 판정에서도 θ 를 래핑** (I4)
+
+`potential()` 과 실패 보상은 `_wrap_angle` 을 쓰는데 성공 판정과 성공 자세
+보너스는 안 쓴다. 그래서 관찰이 완전히 동일한 θ=0 과 θ=2π 가 239점과 38.67점으로
+갈린다. 관찰이 `sin/cos` 라 학생은 두 상태를 구별조차 할 수 없다.
+
+- `rocket_env/tasks/base.py` 의 `within_thresholds` 에서
+  `abs(state.theta)` → `abs(_wrap_angle(state.theta))`
+- `rocket_env/reward.py` 의 성공 자세 보너스도 동일하게
+
+`_wrap_angle` 은 `rocket_env/reward.py` 에 있으므로 `tasks/base.py` 가
+import 한다. reward 는 tasks 를 import 하지 않으므로 순환이 없다.
+
+테스트: θ=0 과 θ=2π 가 같은 결과를 내는지 확인한다.
+
+- [ ] **Step 5: 연료 용량 현실화** (I2)
+
+최대 소모는 `fuel_cost(2g) × max_steps = 0.1 × 800 = 80` 이다. 그런데 용량이
+120/140 이라 **어떤 프리셋에서도 연료가 떨어질 수 없다.** `OUT_OF_FUEL` 은
+전 라운드에서 죽은 코드이고, `landing-gust` 가 내세운 "유한 연료" 축은
+존재하지 않는다.
+
+`landing-gust` 는 55.0, `catch` 는 60.0 으로 낮춘다.
+
+- [ ] **Step 6: Minor 정리**
+
+- `docs/baselines.md` 재측정 명령의 `--preset landing-easy` → `landing-basic`
+  (없는 프리셋이라 `argparse` 가 즉시 거부한다)
+- `_normalize_wind` 가 모순되는 값을 조용히 0으로 만드는 대신 `ConfigError`
+  를 내게 한다. 정당한 키를 말없이 버리는 것은 `_reject_unknown_keys` 가
+  막으려던 바로 그 실패 모드다
+- `catch.x_tower` 도 세계 경계 안인지 검증한다
+- `README.md` 의 실패 보상 설명을 현재 공식으로 고치고 `TIMEOUT` 이 0점임을
+  명시한다 (I3)
+- `README.md` 와 `config.py` 의 "라운드마다 축 하나씩" 주장을 `catch` 라운드에
+  대해 완화한다 — `catch` 는 gust 를 빼고 바람을 줄이며 임계값 넷을 조이는
+  **다른 과제**이지 5라운드 + 1축이 아니다
+
+- [ ] **Step 7: 전체 테스트**
+
+```bash
+SDL_VIDEODRIVER=dummy uv run pytest -v
+```
+
+`test_shaping_bound_covers_every_preset_initial_state` 는 ω₀ 가 Φ 에 들어가지
+않으므로 영향이 없다. 다른 exploit 테스트가 깨지면 **상수를 만지지 말고 보고한다.**
+
+- [ ] **Step 8: 커밋**
+
+---
+
+### Task 17: shaping 을 점수에서 분리 — 학습 신호는 키우고 점수는 불변으로
+
+**배경.** 최종 리뷰의 I1: shaping 총합의 상한 `-Φ(s₀)` 가 0.98~2.25 인데 종료
+보상은 0 / ≤40 / ≥132 다. **shaping 이 리턴의 1% 미만**이라 탐색을 전혀
+안내하지 못한다. 다섯 시드 중 셋이 0% 인 이봉형 분포의 진짜 원인이며,
+"희소 보상 도메인의 본질"이 아니라 **조정 가능한 스케일 선택**이다.
+
+가중치를 그냥 올리면 맴돌기가 되살아난다 — 타임아웃 점수가
+`0 + (Φ(s_T) - Φ(s₀))` 라 가중치를 20배 하면 호버가 20점을 받는다.
+
+**해법: shaping 총합을 정확히 0으로 만든다.**
+
+1. 종료 스텝에서 `Φ(종료) := 0` 으로 두면 망원경 합이 `-Φ(s₀)` 가 된다.
+2. 종료 시 `+Φ(s₀)` 를 더하면 총합이 **정확히 0** 이다.
+
+그러면 shaping 은 **어떤 정책에서도, 어떤 가중치에서도 점수에 기여하지
+않는다.** 리더보드 점수는 순수하게 종료 보상과 연료 비용이 되고, 학습에는
+밀집 신호가 그대로 남는다. 가중치를 마음껏 올려도 **증명 가능하게 exploit
+불가**다.
+
+**Files:** `rocket_env/env.py`, `rocket_env/config.py`,
+`tests/test_env.py`, `tests/test_exploit_regression.py`, `docs/`
+
+- [ ] **Step 1: 실패하는 테스트 작성**
+
+`tests/test_exploit_regression.py` 에 추가한다. 이 테스트가 이 태스크의
+핵심 산출물이다 — 성질을 직접 단언한다.
+
+```python
+def test_return_is_independent_of_shaping_weights():
+    """shaping 가중치를 바꿔도 에피소드 점수가 변하지 않는다.
+
+    종료 상태의 Φ 를 0으로 두고 종료 시 Φ(s₀) 를 되돌려주므로 망원경 합이
+    정확히 0이다. 따라서 학생이 학습용 shaping 을 아무리 세게 키워도 평가
+    점수는 영향받지 않는다 — 이것이 shaping 을 증명 가능하게 exploit
+    불가로 만든다. 예전에는 가중치를 올리면 맴돌기가 되살아났다.
+    """
+    loud = {"shaping_w_dist": 500.0, "shaping_w_attitude": 500.0,
+            "shaping_w_speed": 500.0}
+    for preset in ("landing-basic", "catch"):
+        for action in (NOOP, HOVER, FULL_UP):
+            base, _ = rollout(PRESETS[preset], action, 0)
+            amped, _ = rollout({**PRESETS[preset], "reward": loud}, action, 0)
+            assert base == pytest.approx(amped, abs=1e-6), (
+                f"{preset} action={action}: {base} vs {amped}")
+```
+
+- [ ] **Step 2: 테스트 실패 확인**
+
+- [ ] **Step 3: `rocket_env/env.py` 수정**
+
+`reset()` 에서 초기 잠재값을 따로 보관한다.
+
+```python
+        self._potential = potential(self.state, self._target, self.cfg)
+        # 종료 시 되돌려주어 shaping 총합을 정확히 0으로 만든다.
+        self._initial_potential = self._potential
+```
+
+`step()` 에서 종료 스텝의 잠재값을 0으로 두고, 종료 시 보상한다.
+
+```python
+        # 종료 상태의 Φ 는 0으로 둔다. 그러면 망원경 합이 -Φ(s₀) 가 되고,
+        # 아래에서 Φ(s₀) 를 되돌려주면 총합이 정확히 0이 된다. shaping 은
+        # 학습 신호로만 작동하고 점수에는 기여하지 않는다.
+        cur_potential = (0.0 if outcome is not None
+                         else potential(cur, self._target, self.cfg))
+        reward = (shaping(self._potential, cur_potential, self.cfg)
+                  - self.cfg["reward"]["fuel_penalty"] * used)
+        self._potential = cur_potential
+```
+
+종료 처리에서 보상 항을 더한다.
+
+```python
+        if outcome is not None:
+            self._outcome = outcome
+            reward += self._initial_potential
+            reward += terminal_reward(outcome, cur, self._target, self.cfg,
+                                      self._fuel_frac())
+```
+
+`__init__` 에도 `self._initial_potential = 0.0` 을 초기화한다.
+
+- [ ] **Step 4: shaping 가중치 상향**
+
+`DEFAULT_CONFIG["reward"]` 에서 20배로 올린다. 총합이 0이라 점수에 영향이
+없고, 스텝당 신호만 커진다.
+
+```python
+        # 총합이 정확히 0이므로 점수에는 영향이 없다. 값이 클수록 스텝당
+        # 학습 신호가 강해진다. 예전 값(1.0/0.5/0.5)에서는 shaping 이
+        # 리턴의 1% 미만이라 탐색을 전혀 안내하지 못했다.
+        "shaping_w_dist": 20.0,
+        "shaping_w_attitude": 10.0,
+        "shaping_w_speed": 10.0,
+```
+
+- [ ] **Step 5: `SHAPING_BOUND` 를 연료 비용 상한으로 교체**
+
+`tests/test_exploit_regression.py` 에서 `SHAPING_BOUND` 를 없애고 다음으로
+바꾼다. shaping 이 0이므로 정책 간 점수 차의 여유는 이제 연료 비용뿐이다.
+
+```python
+# 정책 간 점수 차이에 허용할 여유. shaping 총합이 정확히 0이므로 남는
+# 변동 요인은 연료 비용뿐이다: fuel_penalty(0.05) x 최대 소모(80) = 4.0.
+FUEL_COST_BOUND = 5.0
+```
+
+기존 `+ SHAPING_BOUND` 를 전부 `+ FUEL_COST_BOUND` 로 바꾸고,
+`test_shaping_bound_covers_every_preset_initial_state` 는 삭제한다 —
+`-Φ(s₀)` 가 더 이상 점수 상한을 정하지 않으므로 검증할 대상이 없다.
+Step 1 의 새 테스트가 그 자리를 대신한다.
+
+- [ ] **Step 6: 전체 테스트**
+
+```bash
+SDL_VIDEODRIVER=dummy uv run pytest -v
+```
+
+**개루프 회귀 테스트가 여전히 6개 프리셋 전부에서 0% 인지 반드시 확인한다.**
+깨지면 상수를 만지지 말고 보고한다.
+
+- [ ] **Step 7: 커밋**
+
+- [ ] **Step 8: 재측정**
+
+```bash
+uv run python scripts/measure_baseline.py --preset landing-basic --steps 1000000 --seeds 5
+```
+
+**이 태스크의 진짜 검증이다.** shaping 이 강해져 이봉형 분포가 완화되면
+(성공 시드 비율 증가, 분산 감소) 다회 제출 완화책의 필요성 자체가 줄어든다.
+숫자를 그대로 보고하고 `docs/baselines.md` 에 기록한다.
 
 ---
 

@@ -95,12 +95,15 @@ highway-env 대비 이점:
 ```
 rocket_env/
 ├── __init__.py       # gymnasium.register("rocket-v0" 외 2종)
+├── types.py          # State(frozen dataclass), Outcome 문자열 상수
 ├── env.py            # RocketEnv(gym.Env) — Gymnasium 파사드, config 병합, 관찰 생성
 ├── physics.py        # 강체 동역학 적분 (태스크·보상 무관, 순수 함수)
+├── reward.py         # 보상 설계 — PBRS shaping + 종료 보상
 ├── config.py         # DEFAULT_CONFIG, 잠금 그룹, 검증, 라운드 프리셋
 ├── wind.py           # OU 바람 프로세스
 ├── tasks/
-│   ├── base.py       # Task 인터페이스
+│   ├── __init__.py   # make_task() 팩토리
+│   ├── base.py       # Task 인터페이스, 공유 로직(out_of_bounds 등)
 │   ├── landing.py    # 지면 착륙
 │   └── catch.py      # 젓가락 포획
 └── render.py         # pygame 드로잉 (rgb_array / human)
@@ -138,22 +141,32 @@ class Task(Protocol):
 ### 적분 (semi-implicit Euler)
 
 ```
-ft = -f·sin(φ)                    # 노즐 접선 방향 성분
-fr =  f·cos(φ)                    # 노즐 축 방향 성분
-fx = ft·cos(θ) - fr·sin(θ)
-fy = ft·sin(θ) + fr·cos(θ)
+thrust_tangential = -f·sin(φ)     # 노즐이 기울어져 생기는 옆 방향 성분 → 토크를 만든다
+thrust_axial      =  f·cos(φ)     # 기체 축 방향 성분 → 기체를 밀어올린다
 
-ρ  = 1 / sqrt(125 / (g/2))        # ≈ 0.198, 125m 자유낙하 후 항력=mg가 되는 계수
+fx = thrust_tangential·cos(θ) - thrust_axial·sin(θ)
+fy = thrust_tangential·sin(θ) + thrust_axial·cos(θ)
+
+# 항력 계수는 종단속도를 설계값으로 두고 역산한다.
+# 무동력 낙하가 평형에 이르면 ρ·v_term = g 이므로:
+v_term = 49.5 m/s                 # 이 로켓이 무동력 낙하 시 도달하는 속도
+ρ      = g / v_term               # ≈ 0.198
 
 ax = fx - ρ·(vx - wind_x)         # 항력은 공기 기준 상대속도에 비례
 ay = fy - g - ρ·vy
-aω = ft·(H/2) / I
+aω = thrust_tangential·(H/2) / I  # = 6·thrust_tangential / H  (얇은 막대, I = H²/12)
 
 x += vx·dt + 0.5·ax·dt²   ;  vx += ax·dt
 y += vy·dt + 0.5·ay·dt²   ;  vy += ay·dt
 θ += ω·dt  + 0.5·aω·dt²   ;  ω  += aω·dt
 φ  = clip(φ + vφ·dt, -20°, +20°)
 ```
+
+**항력 계수를 종단속도에서 역산하는 이유.** 계수 자체는 물리 법칙이 정해주지 않는 **설계 선택**이므로,
+어떤 수로 표현하든 결국 누군가가 고른 값이다. 그렇다면 의미가 바로 읽히는 양으로 고르는 편이 낫다.
+"종단속도 49.5 m/s인 로켓"은 학생이 즉시 이해하고 검증할 수 있는 반면, 같은 값을 다른 경로로 유도하면
+숫자만 남고 의도가 사라진다. 테스트도 이 형태에서 더 강해진다 — 시뮬레이션이 **설계된** 종단속도에
+도달하는지 확인하는 독립적 검증이 되기 때문이다.
 
 **바람은 새 항이 아니라 기존 항력 항의 수정으로 들어간다.** 항력은 물리적으로 공기 기준 상대속도에
 비례해야 하는데 원래 모델은 지면 기준 속도를 썼다. `wind_x = 0`이면 원본과 정확히 일치하고,
@@ -220,7 +233,7 @@ step:   w += ou_theta·(0 - w)·dt + ou_sigma·√dt·N(0,1)
 
 ### 행동: `Discrete(12)`
 
-추력 `{0, 0.2g, 1.0g, 2.0g}` × 노즐 각속도 `{-30°/s, 0, +30°/s}`.
+추력 `{0, 0.2g, 1.0g, 2.0g}` × 노즐 각속도 `{-120°/s, 0, +120°/s}`.
 
 인덱스 순서: `action = thrust_idx * 3 + vphi_idx`.
 
@@ -241,7 +254,7 @@ step:   w += ou_theta·(0 - w)·dt + ou_sigma·√dt·N(0,1)
 | 성공 조건 | `\|x\| < zone_r` **AND** `\|v\| < v_max` **AND** `\|θ\| < θ_max` **AND** `\|ω\| < ω_max` |
 | 기본 임계 | `zone_r=50m`, `v_max=15 m/s`, `θ_max=10°`, `ω_max=10°/s` |
 | 실패 | 접지했으나 조건 미달 → `crash` |
-| 경계 이탈 | `y ≥ 570 - H/2` 또는 `\|x\| > 300` → `crash` |
+| 경계 이탈 | `y ≥ 570 - H/2` 또는 `\|x\| ≥ 300` → `crash` |
 
 ### `catch` — 젓가락 포획
 
@@ -253,9 +266,11 @@ step:   w += ou_theta·(0 - w)·dt + ou_sigma·√dt·N(0,1)
 | 실패 | 판정 미달 → **즉시 `terminated`**, `outcome="missed"` |
 | 그 외 | 팔 높이에 도달하지 못하고 접지 → `crash`. 상단 이탈 → `crash` |
 
-`outcome` 판별 순서: 종료 시점에 `fuel_frac == 0`이면 `"out_of_fuel"`, 그 외 충돌은 `"crash"`,
-포획 판정 미달은 `"missed"`, `max_steps` 도달은 `"timeout"`. 즉 연료 소진이 다른 실패 사유보다
-우선한다 — 학생 디버깅에 가장 유용한 정보이기 때문이다.
+`outcome` 판별 순서: 태스크가 `"crash"`를 반환했고 종료 시점에 `fuel_frac == 0`이면
+`"out_of_fuel"`로 승격된다. **`"crash"`만 승격 대상이다** — `"missed"`는 그 자체로 이미
+명확한 실패 사유라 연료 여부로 덮을 이유가 없고, `"timeout"`을 승격하면 `truncated`(시간
+초과)와 `terminated`(연료 소진으로 인한 충돌)의 의미가 뒤섞인다. 리더보드가 이 구분으로
+재시도 가능 여부를 판단하므로 여기서는 코드가 옳다.
 
 상승 중 팔 높이를 통과하는 것은 판정하지 않는다(아래에서 위로 지나가는 경우 무시).
 
@@ -271,11 +286,15 @@ step:   w += ou_theta·(0 - w)·dt + ou_sigma·√dt·N(0,1)
 ### 스텝 보상 — 잠재함수 기반 shaping (PBRS)
 
 ```
-Φ(s)    = -( w_dist·(|dx|/300 + |dy|/300) + w_att·|θ|/(π/2) )
+Φ(s)    = -( w_dist·(|dx|/300 + |dy|/300) + w_att·|wrap(θ)|/(π/2) + w_speed·|v|/50 )
 r_shape = γ·Φ(s') - Φ(s)
 r_fuel  = -fuel_penalty · fuel_used
 r_step  = r_shape + r_fuel
 ```
+
+`wrap(θ)`는 각도를 `(-π, π]`로 접은 값이다. 물리는 θ를 감지 않아 여러 바퀴 돈 상태에서
+`|θ|`가 계속 커지는데, 관찰은 `sin θ, cos θ`라 감긴 횟수를 볼 수 없다. 보상만 감기지 않은
+θ에 의존하면 관찰로는 구분 안 되는 두 상태가 다른 보상을 받아 비마르코프가 된다.
 
 PBRS를 쓰는 통상적 이유는 최적 정책 불변성 보장이지만, 여기서 더 중요한 것은 **부수 효과**다.
 `shaping_gamma = 1.0`일 때 `r_shape`를 전부 더하면 정확히 망원경처럼 접힌다:
@@ -285,7 +304,24 @@ PBRS를 쓰는 통상적 이유는 최적 정책 불변성 보장이지만, 여�
 ```
 
 즉 **shaping 총합이 에피소드 길이와 완전히 무관하다.** 따라서 "목표 근처에서 오래 버티며 점수
-쌓기" 꼼수가 구조적으로 차단된다. `Φ ∈ [-3.8, 0]`이므로 총합은 `±3.8`로 엄격히 유계다.
+쌓기" 꼼수가 구조적으로 차단된다.
+
+총합의 상한은 도달 가능한 상태 전체에서의 Φ 범위가 아니라 **`-Φ(s_0)`, 즉 초기 조건만으로
+정해진다** (`Φ(s_T) ≤ 0`이므로). 실제 구현은 이를 프리셋별 초기 분포에서 직접 측정해 상한을
+잡는다 — `tests/test_exploit_regression.py`의 `SHAPING_BOUND = 4.0`이 그 값이고,
+`test_shaping_bound_covers_every_preset_initial_state`가 매 실행마다 실제로 덮이는지
+재확인한다. 200 표본(시드 0) 기준 프리셋별 `-Φ(s_0)` 최악값:
+
+| 프리셋 | `-Φ(s_0)` 최악값 |
+|--------|------------------|
+| `landing-descent` / `landing-wind` / `landing-gust` | ≈ 2.187 (동률 최댓값) |
+| `catch` | ≈ 2.003 |
+| `landing-attitude` | ≈ 1.102 |
+| `landing-basic` | ≈ 0.970 |
+
+`SHAPING_BOUND = 4.0`은 이 최댓값(≈2.187)에 여유를 둔 상수다. 라운드 설계가 바뀌어 초기
+분포가 넓어지면 위 테스트가 실패해 갱신 시점을 알려준다 — 값 자체를 스펙에 하드코딩해
+동기화가 깨지게 두지 않는다.
 
 **`shaping_gamma`를 1.0으로 두는 것이 중요하다.** γ < 1이면 접힘이 정확하지 않다:
 
@@ -314,18 +350,32 @@ R = success_base
   + w_time     · (1 - t / max_steps)
 ```
 
-**실패** (`crash` / `missed` / `timeout` / `out_of_fuel`):
+**`timeout`**: 시간이 다 되도록 판정 지점(접지·팔 통과)에 이르지 못했다는 뜻이므로 **항상
+0점**이다. 목표 근처에서 맴돌며 점수를 쌓는 경로를 원천 차단한다 — 맴돌기가 착륙을
+시도하다 실패하는 쪽보다 높은 점수를 받으면, 최적 전략이 "절대 착륙하지 않기"가 되기
+때문이다.
+
+**`crash` / `missed` / `out_of_fuel`** (판정 지점에 실제로 도달한 실패):
 
 ```
-R = failure_max · clip(1 - d_final / d_initial, 0, 1)
-    d         = sqrt(dx² + dy²)
-    d_initial = reset() 직후의 d  (에피소드마다 고정, 0 나눗셈 방지를 위해 max(d_initial, 1.0) 사용)
-    d_final   = 종료 시점의 d
+R = failure_max · min(
+        closeness(|x - target_x|, zone_r),
+        closeness(|y - target_y|, zone_r),
+        closeness(|v|,            v_max),
+        closeness(|wrap(θ)|,      θ_max),
+        closeness(|ω|,            ω_max),
+    )
+
+closeness(value, threshold) = clip(1 - value / (2·threshold), 0, 1)
 ```
 
-실패 점수를 **진행도**에 비례시킨 것이 원본 버그의 직접적 해법이다. 원본은 실패에도
-`(max_steps - step_id)`를 곱해 조기 자폭이 고득점이었다. 진행도는 정반대로 동작한다 —
-시작 지점에서 바로 추락하면 `d_final ≈ d_initial`이라 **0점**이다.
+`closeness`는 임계값의 2배 지점에서 0이 되는 선형 근접도이며, 임계값 자체에서 0.5다.
+실패 점수를 **성공 판정에 쓰는 다섯 조건(수평 오차·고도 오차·속도·자세·각속도) 각각의
+근접도 중 가장 나쁜 것**으로 매기는 것이 원본 버그의 해법이다. 원본은 실패에도
+`(max_steps - step_id)`를 곱해 조기 자폭이 고득점이었다. 목표까지의 직선 거리 진행도로
+매기던 예전 설계도 문제가 있었다 — 목표가 지면에 있어 중력이 거리를 공짜로 좁혀주는 탓에
+자유낙하만으로 실패 점수의 80~89%를 받았다. 평균이 아니라 **최솟값**을 쓰는 이유도
+같은 맥락이다 — 평균이면 "속도만 빼고 완벽"이 높은 점수를 받아 같은 허점이 되살아난다.
 
 ### 태스크별 기본 프로파일
 
@@ -342,6 +392,7 @@ R = failure_max · clip(1 - d_final / d_initial, 0, 1)
 | `shaping_gamma` | 1.0 | 1.0 | |
 | `shaping_w_dist` | 1.0 | 1.0 | |
 | `shaping_w_attitude` | 0.5 | 0.5 | |
+| `shaping_w_speed` | 0.5 | 0.5 | Φ에 속도 항을 더해 느린 접근에도 shaping 신호를 준다 |
 | `fuel_penalty` | 0.05 | 0.05 | |
 | **성공 점수 범위** | 100–250 | 100–250 | |
 | **실패 점수 범위** | 0–40 | 0–40 | |
@@ -367,7 +418,7 @@ R = failure_max · clip(1 - d_final / d_initial, 0, 1)
 
 ## 9. Config 스키마와 잠금 정책
 
-### 전체 스키마 (기본값 = `landing-normal`)
+### 전체 스키마 (기본값 = 프리셋과 무관한 원본 기본값)
 
 ```python
 {
@@ -405,7 +456,7 @@ R = failure_max · clip(1 - d_final / d_initial, 0, 1)
     "w_fuel": 30.0, "w_time": 30.0,
     "failure_max": 40.0,
     "shaping_gamma": 1.0,
-    "shaping_w_dist": 1.0, "shaping_w_attitude": 0.5,
+    "shaping_w_dist": 1.0, "shaping_w_attitude": 0.5, "shaping_w_speed": 0.5,
     "fuel_penalty": 0.05,
   },
 
@@ -443,17 +494,29 @@ R = failure_max · clip(1 - d_final / d_initial, 0, 1)
 
 ### 라운드 프리셋
 
-`rocket_env.config.PRESETS`에 5종을 제공한다.
+`rocket_env.config.PRESETS`에 6종을 제공한다. 라운드마다 난이도 축을 하나씩만
+추가한다 — 두 라운드 사이에서 여러 축이 동시에 바뀌면 학생은 무엇이 새로
+어려워졌는지 모르고, 조교는 어디서 막히는지 진단할 수 없다. 착륙 라운드는
+모두 `success` 임계값(zone_r 포함)을 공유한다 — 난이도는 초기 조건과 외란에서만
+온다.
 
-| 프리셋 | task | wind | fuel | init θ | vy₀ | zone_r |
-|--------|------|------|------|--------|-----|--------|
-| `landing-easy` | landing | none | ∞ | ±15° | -30 | 50 |
-| `landing-normal` | landing | constant 8 m/s | 120 | ±45° | -60~-50 | 50 |
-| `landing-hard` | landing | gust (σ=3, ±15) | 90 | ±85° | -70~-60 | 30 |
-| `catch-normal` | catch | constant 5 m/s | 140 | ±30° | -50~-40 | 6 |
-| `catch-hard` | catch | gust (σ=3, ±12) | 110 | ±60° | -60~-55 | 6 |
+| 프리셋 | task | wind | fuel | y₀ | vy₀ | init θ | zone_r |
+|--------|------|------|------|----|----|--------|--------|
+| `landing-basic` | landing | none | ∞ | 200 | -20 | ±5° | 50 |
+| `landing-attitude` | landing | none | ∞ | 200 | -20 | ±30° | 50 |
+| `landing-descent` | landing | none | ∞ | 450 | -50~-40 | ±30° | 50 |
+| `landing-wind` | landing | constant 8 m/s | ∞ | 450 | -50~-40 | ±30° | 50 |
+| `landing-gust` | landing | gust (σ=3, ±12) | 120 | 450 | -50~-40 | ±30° | 50 |
+| `catch` | catch | constant 5 m/s | 140 | 450 | -50~-40 | ±30° | 6 |
 
-`gust` 프리셋은 모두 `ou_theta = 0.15`를 쓴다. `ou_theta`는 평균회귀 속도로, 0.15에서
+축 진행: `landing-basic`이 자세 보정 없이(±5°는 성공 임계 ±10° 안쪽) 감속만
+가르치고, `landing-attitude`가 자세 보정을 추가하고(±30°), `landing-descent`가
+고도·하강속도를 올리고, `landing-wind`가 일정한 옆바람을, `landing-gust`가
+돌풍과 유한 연료를(이 라운드만 축이 둘이며, 둘 다 "예측 불가능한 조건에서
+버티기"라는 한 주제다) 추가한다. `catch`는 지면 대신 발사탑 팔 높이를
+통과해야 하는 별도 태스크다.
+
+`gust` 프리셋은 `ou_theta = 0.15`를 쓴다. `ou_theta`는 평균회귀 속도로, 0.15에서
 바람의 상관 시간이 대략 `1/0.15 ≈ 6.7초`가 된다 — 40초 에피소드 안에 약 6회 방향이 바뀌는 셈이라
 "돌풍"으로 체감되면서도 제어 불가능할 만큼 빠르지는 않다.
 
@@ -469,9 +532,11 @@ Colab 헤드리스 환경에서는 `SDL_VIDEODRIVER=dummy`로 동작한다.
 - 하늘 그라디언트 배경, 지면
 - 태스크별 구조물: **착륙 패드**(landing, 반경 `zone_r` 표시) 또는 **타워 + 젓가락 팔**(catch, `y_arm` 높이)
 - 로켓: 본체, 노즈콘, 그리드핀, `φ`만큼 회전한 노즐, 추력에 비례한 길이·색의 화염
-- 페이드되는 궤적
-- HUD: 고도, 속도, 자세각, 연료 게이지, 바람 화살표, 스텝 카운터
-- 결과 배너: `LANDED` / `CAUGHT` / `CRASHED` / `MISSED` / `OUT OF FUEL`
+- 궤적: 페이드하지 않는다. 최근 400개 점만 유지하고 그 이전은 그대로 잘려나간다
+- HUD: 모노스페이스 텍스트 6줄(고도·속도·자세각·연료·바람·스텝). 게이지나 화살표 같은
+  그래픽 위젯은 없다 — 숫자를 그대로 읽는 편이 채점 디버깅에 더 유용하다는 판단이다
+- 결과 배너: `LANDED / CAUGHT`(성공은 태스크 불문 한 문구) / `CRASHED` / `MISSED` /
+  `OUT OF TIME` / `OUT OF FUEL`
 
 배경 이미지 에셋을 쓰지 않고 전부 벡터로 그린다(2절 라이선스 결정).
 
@@ -488,7 +553,7 @@ Colab 헤드리스 환경에서는 `SDL_VIDEODRIVER=dummy`로 동작한다.
 | 5 | **exploit 회귀** — `즉시 자폭 ≈ 0점 < 무행동 < 근접 호버 < 성공` | 원본 버그 재발 방지 |
 | 6 | PBRS 텔레스코핑 — `sum(r_shape) == Φ(s_T) - Φ(s_0)` (오차 1e-6) | 에피소드 길이 편향 0 검증 |
 | 7 | 잠금 config 키 변경 시 `ConfigError` | 학생 설정 검증 |
-| 8 | `wind_x=0`일 때 항력이 원본 공식과 수치적으로 일치 | 바람 도입이 무풍 거동을 바꾸지 않음 확인 |
+| 8 | 무풍(`wind_x=0`)에서 항력이 그대로 감속으로 작용하고, 바람과 같은 속도로 움직이면 항력이 0이 됨을 확인 — clean-room 재구현이라 원본 저장소 수치와 비교하는 오라클은 없다 | 바람 도입이 무풍 거동을 물리적으로 일관되게 바꾸는지 확인 |
 | 9 | SB3 DQN 5k스텝 smoke — 오류 없이 학습되고 무작위 정책보다 나음 | 통합 확인 |
 | 10 | 렌더 smoke — `rgb_array` shape/dtype, 두 태스크 모두 | 렌더 크래시 방지 |
 
@@ -510,3 +575,7 @@ Colab 헤드리스 환경에서는 `SDL_VIDEODRIVER=dummy`로 동작한다.
 - 과거 highway 학기 데이터 마이그레이션
 - 연속 행동 공간, 이미지 관찰, 멀티 로켓 등 확장
 - `render_miss_fall` — 캐치 실패 후 지면까지 낙하하는 장면의 렌더링 전용 재생
+- `info["fuel_left"]`가 무한 연료(`capacity: null`)일 때 `math.inf`를 그대로 반환한다.
+  `json.dumps`는 이를 비표준 `Infinity`로 직렬화하므로, 서버가 `info`를 저장·전송한다면
+  SDK/평가 워커 스펙에서 이 값 대신 항상 유한한 `fuel_frac`을 쓰거나 `inf → None` 변환을
+  명시적으로 정의해야 한다.
