@@ -1,0 +1,372 @@
+<title>로켓 착륙 — 수동 조종</title>
+<style>
+  :root{
+    --bg:#0a0b12; --ink:#e7ecf6; --dim:#878da0;
+    --panel:rgba(12,14,26,.55); --line:rgba(150,160,190,.16);
+    --amber:#ffca5c; --green:#46c35a; --red:#de463a;
+    --mono:ui-monospace,SFMono-Regular,Menlo,"DejaVu Sans Mono",Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:
+      radial-gradient(120% 80% at 50% -10%, #171a2b 0%, var(--bg) 55%);
+    color:var(--ink); font-family:var(--mono);
+    display:flex; flex-direction:column; align-items:center;
+    min-height:100%; padding:14px; gap:12px;
+  }
+  header{width:100%; max-width:900px; display:flex; flex-wrap:wrap;
+    align-items:center; gap:10px 18px}
+  h1{font-size:15px; font-weight:700; letter-spacing:.12em; text-transform:uppercase;
+    margin:0; color:var(--ink)}
+  h1 .rk{color:var(--amber)}
+  .sub{color:var(--dim); font-size:12px; letter-spacing:.04em}
+  .spacer{flex:1}
+  .field{display:flex; align-items:center; gap:6px; font-size:12px; color:var(--dim)}
+  select,input{
+    font-family:var(--mono); font-size:12px; color:var(--ink);
+    background:#12141f; border:1px solid var(--line); border-radius:6px;
+    padding:5px 8px; outline:none;
+  }
+  input{width:130px}
+  select:focus,input:focus{border-color:var(--amber)}
+  input::placeholder{color:#5b6076}
+  .stage{position:relative; border:1px solid var(--line); border-radius:12px;
+    overflow:hidden; box-shadow:0 24px 60px -30px #000, 0 0 0 1px rgba(0,0,0,.4) inset;
+    background:#06060e}
+  canvas{display:block; width:min(58vh,440px); height:min(87vh,660px); touch-action:none}
+  footer{width:100%; max-width:900px; display:flex; flex-wrap:wrap;
+    gap:8px 10px; justify-content:center; color:var(--dim); font-size:12px}
+  kbd{font-family:var(--mono); font-size:11px; color:var(--ink);
+    background:#161a28; border:1px solid var(--line); border-bottom-width:2px;
+    border-radius:5px; padding:2px 7px; letter-spacing:.02em}
+  .key{display:inline-flex; align-items:center; gap:6px; white-space:nowrap}
+  .note{width:100%; max-width:900px; text-align:center;
+    color:#6b7089; font-size:11px; letter-spacing:.03em}
+  a{color:var(--amber); text-decoration:none}
+</style>
+
+<header>
+  <h1><span class="rk">▲</span> 로켓 착륙 · 수동 조종</h1>
+  <span class="sub" id="phys">TWR 2.5 · gimbal ±8°</span>
+  <span class="spacer"></span>
+  <label class="field">라운드
+    <select id="round"></select>
+  </label>
+  <label class="field">별명
+    <input id="livery" maxlength="9" placeholder="YONSEI인이활" />
+  </label>
+</header>
+
+<div class="stage">
+  <canvas id="c" width="480" height="720"></canvas>
+</div>
+
+<footer>
+  <span class="key"><kbd>↑</kbd><kbd>↓</kbd> 추력 단계</span>
+  <span class="key"><kbd>←</kbd><kbd>→</kbd> 노즐 짐벌</span>
+  <span class="key"><kbd>R</kbd> 재시작</span>
+  <span class="key"><kbd>1</kbd>–<kbd>4</kbd> 라운드</span>
+</footer>
+<p class="note">파이썬 환경(rocket-env)의 물리를 그대로 포팅했다 — 여기서 익힌 감각이 학습 환경과 같다.</p>
+
+<script>
+"use strict";
+const MONO="ui-monospace,Menlo,Consolas,monospace";
+// ── 물리 상수 (physics.py 와 동일) ──────────────────────────────
+const G=9.8, DT=0.05, H=50, I=H*H/12, PHI_MAX=8*Math.PI/180;
+const VT=250, RHO=G/VT;
+const THRUST=[0, 0.6*G, 1.0*G, 1.6*G, 2.5*G];      // 5단
+const NOZ=[-120*Math.PI/180, 0, 120*Math.PI/180];   // 노즐 각속도 3단
+const MAX_STEPS=800, GROUND=H/2;                     // 접지 시 중심 y
+
+// ── 라운드 (config.py PRESETS 요약) ─────────────────────────────
+const ROUNDS={
+  "landing-basic":   {y:250, vy:-20, x:30,  th:5,  om:[6,10],  wind:0,   fuel:null, vmax:15, zone:50, gust:false},
+  "landing-attitude":{y:300, vy:-28, x:30,  th:20, om:[6,10],  wind:0,   fuel:null, vmax:12, zone:50, gust:false},
+  "landing-descent": {y:550, vy:-40, x:60,  th:20, om:[8,12],  wind:0,   fuel:null, vmax:10, zone:50, gust:false},
+  "landing-gust":    {y:800, vy:-45, x:90,  th:30, om:[10,14], wind:12,  fuel:70,   vmax:8,  zone:50, gust:true},
+};
+const LABEL={"landing-basic":"1 · basic","landing-attitude":"2 · attitude",
+  "landing-descent":"3 · descent","landing-gust":"4 · gust"};
+
+// ── 하늘 색 (render.py SKY_STOPS) ───────────────────────────────
+const SKY=[[0,[206,132,96]],[.30,[150,80,104]],[.58,[52,50,110]],[.82,[6,6,14]],[1,[6,6,14]]];
+const SKY_TOP=1050;
+function skyColor(y){
+  let t=Math.min(Math.max(y/SKY_TOP,0),1);
+  for(let i=0;i<SKY.length-1;i++){
+    const[a,ca]=SKY[i],[b,cb]=SKY[i+1];
+    if(t<=b){const u=b>a?(t-a)/(b-a):0;
+      return`rgb(${ca.map((v,k)=>Math.round(v+(cb[k]-v)*u)).join(",")})`;}
+  }
+  return`rgb(6,6,14)`;
+}
+
+// ── 상태 / 리셋 ─────────────────────────────────────────────────
+const cvs=document.getElementById("c"), ctx=cvs.getContext("2d");
+const W=cvs.width, Hh=cvs.height;
+let S, cam, particles, thrust, outcome, boom, frames, roundKey, rng;
+let held={left:false,right:false};
+
+function rand(a,b){return a+Math.random()*(b-a);}
+function reset(){
+  const r=ROUNDS[roundKey];
+  const sgn=Math.random()<.5?-1:1, osgn=Math.random()<.5?-1:1;
+  S={x:rand(-r.x,r.x), y:r.y, vx:0, vy:r.vy,
+     theta:rand(-r.th,r.th)*Math.PI/180, omega:osgn*rand(r.om[0],r.om[1])*Math.PI/180,
+     phi:0, fuel:r.fuel, wind:r.wind?(r.gust?0:r.wind):0, step:0};
+  cam=null; particles=[]; thrust=0; outcome=null; boom=0; frames=0;
+  document.getElementById("phys").textContent=
+    `${LABEL[roundKey]} · 접지 <${r.vmax} m/s · 존 ±${r.zone} m`;
+}
+
+// ── 물리 한 스텝 (integrate) ────────────────────────────────────
+function step(){
+  const r=ROUNDS[roundKey];
+  // 바람: gust 는 OU 유사(간단화), constant 는 고정
+  if(r.wind){ if(r.gust){ S.wind += (0-S.wind)*.02 + rand(-1,1)*.5;
+    S.wind=Math.max(-r.wind,Math.min(r.wind,S.wind)); } else S.wind=r.wind; }
+  let th = THRUST[thrust];
+  if(S.fuel!==null && S.fuel<=0) th=0;              // 연료 소진
+  const nozzle = held.left?NOZ[0]:held.right?NOZ[2]:NOZ[1];
+  const s=S, tt=-th*Math.sin(s.phi), ta=th*Math.cos(s.phi);
+  const fx=tt*Math.cos(s.theta)-ta*Math.sin(s.theta);
+  const fy=tt*Math.sin(s.theta)+ta*Math.cos(s.theta);
+  const ax=fx-RHO*(s.vx-s.wind), ay=fy-G-RHO*s.vy, al=tt*(H/2)/I;
+  s.x+=s.vx*DT+.5*ax*DT*DT; s.y+=s.vy*DT+.5*ay*DT*DT;
+  s.vx+=ax*DT; s.vy+=ay*DT;
+  s.theta+=s.omega*DT+.5*al*DT*DT; s.omega+=al*DT;
+  s.phi=Math.max(-PHI_MAX,Math.min(PHI_MAX,s.phi+nozzle*DT));
+  if(S.fuel!==null) S.fuel=Math.max(0,S.fuel-(th/G)*DT);
+  s.step++;
+  // 배기 입자
+  if(th>0){emit(th);}
+  // 종료 판정
+  if(s.y<=GROUND){
+    const spd=Math.hypot(s.vx,s.vy), tilt=Math.abs(wrap(s.theta)), om=Math.abs(s.omega);
+    const ok = spd<r.vmax && tilt<10*Math.PI/180 && om<10*Math.PI/180 && Math.abs(s.x)<r.zone;
+    outcome=ok?"LANDED":"CRASHED"; s.y=GROUND;
+    if(!ok && spd>22){ boom=1e-6; explode(); }
+  } else if(s.fuel!==null && s.fuel<=0 && th===0 && s.vy<-r.vmax){
+    // 연료 소진 후에도 계속 판정은 접지에서
+  } else if(s.step>=MAX_STEPS){ outcome="OUT OF TIME"; }
+}
+function wrap(t){while(t>Math.PI)t-=2*Math.PI;while(t<=-Math.PI)t+=2*Math.PI;return t;}
+
+// ── 입자 ────────────────────────────────────────────────────────
+function emit(th){
+  const ratio=th/(2.5*G), n=Math.round(10*ratio);
+  const nx=S.x+Math.sin(S.theta+S.phi)*0 , ny=S.y; // 노즐(간단히 중심 아래)
+  const bx=Math.sin(S.phi), by=-Math.cos(S.phi);
+  const ct=Math.cos(S.theta),st=Math.sin(S.theta);
+  const dx=bx*ct-by*st, dy=bx*st+by*ct, ang=Math.atan2(dy,dx);
+  const ox=Math.sin(S.theta)*(-H/2)*-1; // nozzle offset along body -y
+  const px=S.x - Math.sin(S.theta)*(-H/2), py=S.y + Math.cos(S.theta)*(-H/2);
+  for(let i=0;i<n;i++){
+    const sp=rand(45+90*ratio,75+150*ratio), a=ang+rand(-.25,.25);
+    particles.push({x:px,y:py,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,age:0,life:1.6,k:"s"});
+  }
+}
+function explode(){
+  const ix=S.x, iy=Math.max(2,S.y-H/2);
+  for(let i=0;i<90;i++){const a=rand(0,7),s=rand(20,160);
+    particles.push({x:ix,y:iy+2,vx:Math.cos(a)*s,vy:Math.abs(Math.sin(a)*s),age:0,life:rand(.3,.7),k:"f"});}
+  for(let i=0;i<110;i++){const a=rand(0,7),s=rand(130,360);
+    particles.push({x:ix,y:iy,vx:Math.cos(a)*s,vy:Math.sin(a)*s,age:0,life:rand(.5,1.1),k:"d"});}
+  for(let i=0;i<80;i++){const big=Math.random()<.5;
+    particles.push({x:ix+rand(-6,6),y:iy+rand(0,10),vx:rand(-40,40),vy:rand(20,90)+20,
+      y0:iy,bill:rand(-1,1),sm:big?rand(1.5,2.2):rand(.45,.7),am:big?rand(.35,.6):rand(1.15,1.6),
+      age:0,life:rand(4,7.5),k:"bs"});}
+}
+function updateParticles(){
+  for(const p of particles){
+    p.x+=p.vx*DT; p.y+=p.vy*DT;
+    const drag=p.k==="s"?.88:p.k==="bs"?.91:p.k==="f"?.85:.96;
+    p.vx*=drag; p.vy*=drag;
+    if(p.k==="s") p.vy+=11*DT;
+    else if(p.k==="bs"){p.vy+=26*DT; if(p.y-(p.y0||p.y)>30)p.vx+=(p.bill||0)*30*DT;}
+    else if(p.k==="d"||p.k==="f") p.vy-=70*DT;
+    if(p.y<0){const sd=Math.abs(p.vy);p.y=0;const out=p.vx>=0?1:-1;p.vx+=out*sd*.85;p.vy=sd*.18;}
+    p.age+=DT;
+  }
+  particles=particles.filter(p=>p.age<=p.life).slice(-900);
+}
+
+// ── 카메라 & 렌더 ───────────────────────────────────────────────
+function camTarget(){
+  const tx=0,ty=GROUND, cx=(S.x+tx)/2, cy=(S.y+ty)/2;
+  const spanx=Math.abs(S.x-tx)+2.2*H, spany=Math.abs(S.y-ty)+2.2*H;
+  let sc=Math.min(W/spanx,Hh/spany);
+  const minsc=W/1800; sc=Math.max(minsc,Math.min(14,sc));
+  if(boom>0){sc=Math.max(minsc,sc*(1-.8*boom)); return[cx,cy+230*boom,sc];}
+  return[cx,cy,sc];
+}
+function to(px,py){const[cx,cy,sc]=cam;return[W/2+(px-cx)*sc,Hh/2-(py-cy)*sc];}
+
+function draw(){
+  const[cx,cy,sc]=cam;
+  // 하늘 (월드 고정)
+  for(let y=0;y<Hh;y+=3){const wy=cy+(Hh/2-y)/sc;ctx.fillStyle=skyColor(wy);ctx.fillRect(0,y,W,3);}
+  // 지면 라벨(하늘 y=820) — 강의명
+  drawSkyLabel();
+  // 궤적
+  ctx.strokeStyle="rgba(120,180,230,.28)";ctx.lineWidth=Math.max(1,2*sc/1.07);
+  ctx.beginPath();let f=true;for(const p of trail){const[x,y]=to(p[0],p[1]);if(f){ctx.moveTo(x,y);f=false;}else ctx.lineTo(x,y);}ctx.stroke();
+  // 지면
+  const[,gy]=to(0,0);
+  // 로켓 & 화염 (폭발 전만)
+  if(boom<=0){drawFlame();drawRocket();}
+  // 입자
+  drawParticles(sc);
+  // 지면 오클루더 (지표 아래 가림) + 패드
+  ctx.fillStyle="#24262c";ctx.fillRect(0,Math.max(0,gy),W,Hh-Math.max(0,gy));
+  const r=ROUNDS[roundKey];const[lx]=to(-r.zone,0),[rx]=to(r.zone,0);
+  ctx.strokeStyle="#c8be5a";ctx.lineWidth=Math.max(3,6*sc/1.07);
+  ctx.beginPath();ctx.moveTo(lx,gy);ctx.lineTo(rx,gy);ctx.stroke();
+  if(boom>0)drawFlash();
+  drawHUD();
+  if(outcome)drawBanner();
+}
+
+function drawSkyLabel(){
+  const[x,y]=to(0,820);const sc=cam[2];const fs=Math.round(30*sc);
+  if(fs<7||y<-60||y>Hh+60)return;
+  ctx.save();ctx.textAlign="center";ctx.fillStyle="rgba(240,226,214,.92)";
+  ctx.font=`700 ${fs}px ${MONO}`;
+  ctx.fillText("인공지능의 이해와 활용",x,y);
+  ctx.font=`700 ${Math.round(fs*.85)}px ${MONO}`;
+  ctx.fillText("2026-2",x,y+fs*1.05);
+  ctx.fillText("Rocket Competition",x,y+fs*2.35);
+  ctx.restore();
+}
+
+function bodyTo(bx,by){const ct=Math.cos(S.theta),si=Math.sin(S.theta);
+  return to(S.x+bx*ct-by*si, S.y+bx*si+by*ct);}
+function drawRocket(){
+  const w=4.2;
+  ctx.fillStyle="#787d87";
+  poly([[-w-1.2,-H/2],[w+1.2,-H/2],[w,-H/2+5],[-w,-H/2+5]]);
+  ctx.fillStyle="#e8eaee";
+  poly([[-w,-H/2+4],[w,-H/2+4],[w,H/2-1.5],[w-1.4,H/2],[-w+1.4,H/2],[-w,H/2-1.5]]);
+  ctx.fillStyle="#b0b6c2";
+  for(const s of[-1,1])poly([[s*w,H/2-4],[s*(w+3.4),H/2-4],[s*(w+3.4),H/2-1.2],[s*w,H/2-1.2]]);
+  // 별명(세로)
+  const txt=(document.getElementById("livery").value||"YONSEI인이활").slice(0,9);
+  const sc=cam[2], gh=H*.088*sc;
+  if(gh>=6){ctx.save();const[ox,oy]=bodyTo(0,2);
+    ctx.translate(ox,oy);ctx.rotate(-S.theta);ctx.textAlign="center";ctx.textBaseline="middle";
+    ctx.fillStyle="#28387a";ctx.font=`700 ${Math.round(gh*.95)}px ${MONO}`;
+    const n=txt.length;for(let i=0;i<n;i++)ctx.fillText(txt[i],0,(i-(n-1)/2)*gh);
+    ctx.restore();}
+}
+const FL=[["rgba(255,110,40,.95)",1,1],["rgba(255,168,62,.95)",.78,.62],["rgba(255,236,150,.95)",.48,.34]];
+function drawFlame(){
+  const th=THRUST[thrust];if(th<=0)return;
+  const ratio=th/(2.5*G), len=8+70*Math.pow(ratio,.75), hw=1.8+2.8*ratio;
+  const ct=Math.cos(S.theta),si=Math.sin(S.theta);
+  const abx=Math.sin(S.phi),aby=-Math.cos(S.phi);
+  const axx=abx*ct-aby*si, axy=abx*si+aby*ct, px=-axy,py=axx;
+  const[nx,ny]=[S.x+0*ct-(-H/2)*si, S.y+0*si+(-H/2)*ct];
+  for(const[col,ls,ws] of FL){
+    const L=len*ls,Wd=hw*ws;ctx.fillStyle=col;ctx.beginPath();let first=true;
+    for(const side of[1,-1]){const seq=side>0?[0,1,2,3,4,5,6,7,8]:[8,7,6,5,4,3,2,1,0];
+      for(const i of seq){const t=i/8,wv=Wd*Math.pow(1-t,.7);
+        const along=t*L+rand(-1,1)*L*.05, lat=side*wv+rand(-Wd*.55,Wd*.55)*(1-t);
+        const[sx,sy]=to(nx+axx*along+px*lat, ny+axy*along+py*lat);
+        if(first){ctx.moveTo(sx,sy);first=false;}else ctx.lineTo(sx,sy);}}
+    ctx.closePath();ctx.fill();
+  }
+}
+function drawParticles(sc){
+  for(const p of particles){const f=p.age/p.life,[x,y]=to(p.x,p.y);
+    if(p.k==="s"){const rd=Math.max(1,(2+14*f)*sc);ctx.fillStyle=`rgba(215,215,225,${.67*(1-f)**1.5})`;circle(x,y,rd);}
+    else if(p.k==="bs"){const rd=Math.max(2,(4+26*f)*(p.sm||1)*sc);
+      ctx.fillStyle=`rgba(60,52,50,${Math.max(0,Math.min(1,.78*(p.am||1)*(1-f)**1.3))})`;circle(x,y,rd);}
+    else if(p.k==="f"){const rd=Math.max(1,(3+8*f)*sc);ctx.fillStyle=`rgba(255,${Math.round(200-120*f)},${Math.round(120-60*f)},${.9*(1-f)})`;circle(x,y,rd);}
+    else{const rd=Math.max(1,1.5*sc);ctx.fillStyle=`rgba(250,226,190,${.95*(1-f)})`;circle(x,y,rd);}
+  }
+}
+function drawFlash(){const a=Math.max(0,235*(1-boom*14))/255;if(a<=0)return;
+  ctx.fillStyle=`rgba(255,246,226,${a})`;ctx.fillRect(0,0,W,Hh);
+  // 충격파 링
+  if(boom<.09){const t=boom/.09,[cx2,cy2]=to(S.x,Math.max(0,S.y-H/2));
+    ctx.strokeStyle=`rgba(255,240,210,${(1-t)*.8})`;ctx.lineWidth=Math.max(2,6*cam[2]*(1-t));
+    ctx.beginPath();ctx.arc(cx2,cy2,(12+300*t)*cam[2],0,7);ctx.stroke();}
+}
+function poly(pts){ctx.beginPath();pts.forEach(([bx,by],i)=>{const[x,y]=bodyTo(bx,by);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.closePath();ctx.fill();}
+function circle(x,y,r){ctx.beginPath();ctx.arc(x,y,r,0,7);ctx.fill();}
+
+// ── HUD ─────────────────────────────────────────────────────────
+function grade(t){t=Math.min(Math.max(t,0),1);const g=[70,195,90],y=[225,200,70],r=[222,70,58];
+  const[a,b,u]=t<.5?[g,y,t/.5]:[y,r,(t-.5)/.5];return a.map((v,k)=>Math.round(v+(b[k]-v)*u));}
+function drawHUD(){
+  const r=ROUNDS[roundKey], spd=Math.hypot(S.vx,S.vy);
+  const ff=r.fuel===null?1:Math.max(0,Math.min(1,S.fuel/r.fuel));
+  const lines=[["alt",`${(S.y-H/2).toFixed(0)} m`],["spd",`${spd.toFixed(1)} m/s`,Math.min(spd/50,1)],
+    ["tilt",`${(S.theta*180/Math.PI).toFixed(1)}°`],["fuel",r.fuel===null?"inf":`${S.fuel.toFixed(0)}/${r.fuel}`,1-ff],
+    ["wind",`${S.wind.toFixed(1)} m/s`],["step",`${S.step}/${MAX_STEPS}`]];
+  const pw=150, ph=16+lines.length*17;
+  ctx.fillStyle="rgba(10,12,24,.5)";ctx.fillRect(8,8,pw,ph);
+  ctx.textAlign="left";ctx.textBaseline="alphabetic";
+  lines.forEach(([k,v,bar],i)=>{const y=8+16+i*17;
+    if(bar!==undefined){const c=grade(k==="spd"?bar:bar);
+      ctx.fillStyle=`rgba(${c[0]},${c[1]},${c[2]},.55)`;
+      ctx.fillRect(11,y-11,(pw-22)*Math.min(1,k==="spd"?Math.min(spd/50,1):bar),13);}
+    ctx.fillStyle="#e6ecf5";ctx.font="12px var(--mono)";
+    ctx.fillText(`${k.padEnd(4)} ${v}`,13,y);});
+  // 행동 격자 (우상단): 5추력 × 3노즐
+  const cell=18, gx=W-3*cell-40, gy=12;
+  ctx.fillStyle="rgba(10,12,24,.5)";ctx.fillRect(gx-6,gy-4,3*cell+42,5*cell+22);
+  ctx.fillStyle="#e6ecf5";ctx.font="11px var(--mono)";ctx.fillText("action",gx,gy+8);
+  const noz=held.left?0:held.right?2:1;
+  const tl=["0",".6","1.0","1.6","2.5"];
+  for(let tr=0;tr<5;tr++){const ti=4-tr;ctx.fillStyle="#aeb4c6";ctx.fillText(tl[ti],gx-2,gy+30+tr*cell);
+    for(let nz=0;nz<3;nz++){const x=gx+26+nz*cell,y=gy+18+tr*cell;
+      ctx.fillStyle="#30364a";ctx.fillRect(x,y,cell-3,cell-3);
+      if(ti===thrust&&nz===noz){ctx.strokeStyle="#ffca5c";ctx.lineWidth=2;ctx.strokeRect(x+1,y+1,cell-5,cell-5);}}}
+}
+function drawBanner(){
+  const col=outcome==="LANDED"?"#6edc82":outcome==="CRASHED"?"#e6605a":"#c8c8c8";
+  ctx.textAlign="center";ctx.fillStyle=col;ctx.font="700 30px var(--mono)";
+  ctx.fillText(outcome,W/2,Hh/3);
+  ctx.fillStyle="rgba(10,12,24,.6)";ctx.fillRect(W/2-90,Hh/3+18,180,26);
+  ctx.fillStyle="#e6ecf5";ctx.font="14px var(--mono)";ctx.fillText("Press R to retry",W/2,Hh/3+36);
+}
+
+// ── 루프 ────────────────────────────────────────────────────────
+let trail=[];
+function tick(){
+  if(!outcome){ step(); trail.push([S.x,S.y]); if(trail.length>400)trail.shift(); }
+  else if(boom>0){ boom=Math.min(1,boom+1/40); }
+  updateParticles();
+  const tgt=camTarget();
+  if(!cam)cam=tgt; else{const k=(boom>0)?Math.min(.35,.12+.2*boom):.12;
+    cam=[cam[0]+(tgt[0]-cam[0])*k, cam[1]+(tgt[1]-cam[1])*k, cam[2]+(tgt[2]-cam[2])*k];}
+  draw();
+  requestAnimationFrame(tick);
+}
+
+// ── 입력 ────────────────────────────────────────────────────────
+addEventListener("keydown",e=>{
+  const k=e.key;
+  if(["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"," "].includes(k))e.preventDefault();
+  if(k==="ArrowUp"||k==="w")thrust=Math.min(4,thrust+1);
+  else if(k==="ArrowDown"||k==="s")thrust=Math.max(0,thrust-1);
+  else if(k==="ArrowLeft"||k==="a")held.left=true;
+  else if(k==="ArrowRight"||k==="d")held.right=true;
+  else if(k==="r"||k==="R"){trail=[];reset();}
+  else if("1234".includes(k)){const ks=Object.keys(ROUNDS)[+k-1];roundKey=ks;sel.value=ks;trail=[];reset();}
+});
+addEventListener("keyup",e=>{
+  if(e.key==="ArrowLeft"||e.key==="a")held.left=false;
+  if(e.key==="ArrowRight"||e.key==="d")held.right=false;
+});
+
+// ── 초기화 ──────────────────────────────────────────────────────
+const sel=document.getElementById("round");
+for(const k of Object.keys(ROUNDS)){const o=document.createElement("option");o.value=k;o.textContent=LABEL[k];sel.appendChild(o);}
+sel.addEventListener("change",()=>{roundKey=sel.value;trail=[];reset();});
+roundKey="landing-basic"; sel.value=roundKey;
+reset(); tick();
+</script>

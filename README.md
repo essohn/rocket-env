@@ -121,7 +121,14 @@ Colab은 화면이 없으므로 첫 `pygame` import 전에 `os.environ["SDL_VIDE
 ## 직접 조종해 보기 (키보드)
 
 정책 없이 사람이 직접 착륙/포획을 시도해 볼 수 있다 — 환경의 조작감과 난이도를
-몸으로 느끼기에 좋다. 화면이 있는 로컬에서 실행한다.
+몸으로 느끼기에 좋다. 두 가지 방법:
+
+**웹(설치 불필요)** — [`web/play.html`](web/play.html). 파이썬 물리를 그대로
+포팅한 단일 HTML 파일이라 브라우저로 바로 열린다. Colab처럼 화면 없는 환경에서
+쓰던 학생도 링크만으로 조종해 볼 수 있다. `↑/↓` 추력, `←/→` 노즐, `R` 재시작,
+`1`–`4` 라운드.
+
+**파이썬(로컬, pygame 창)** —
 
 ```bash
 uv run python scripts/play.py --preset landing-basic --livery 내별명
