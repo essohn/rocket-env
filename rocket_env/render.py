@@ -126,10 +126,11 @@ SKY_LABEL_COLOR = (240, 226, 214)     # 노을 하늘에 밝게
 SKY_LABEL_WORLD_W = 260.0             # 하늘에서 차지하는 폭 (m)
 SKY_LABEL_Y = 820.0                   # 고고도 — 초반 낙하 구간(보라 하늘)
 PAD_COLOR = (200, 190, 90)
-TOWER_COLOR = (150, 155, 165)
-ARM_COLOR = (230, 120, 60)
-JAW_COLOR = (255, 175, 60)
-JAW_BACK_COLOR = (196, 128, 42)   # 뒤쪽 팔 — 그늘져 어둡게
+# 구조물은 모두 어두운 회색으로, 명도만 살짝 달리해 몸통·앞팔·뒷팔을 구분한다.
+TOWER_COLOR = (96, 99, 106)       # 몸통(마스트) — 중간 밝기
+JAW_COLOR = (132, 136, 144)       # 앞쪽 팔(팔1) — 앞이라 밝게
+JAW_BACK_COLOR = (66, 68, 74)     # 뒤쪽 팔(팔2) — 그늘져 어둡게
+ARM_COLOR = (230, 120, 60)        # 포획 판정 범위 표시선(구조물 아님)
 JAW_CLOSED_HALF = 5.0     # 다 물었을 때 턱 안쪽 간격 (m)
 # 카메라가 약간 위에서 내려다본다고 가정한다. 뒤쪽 팔은 화면에서 위로,
 # 앞쪽 팔은 아래로 어긋나게 그려 둘이 구분되고, 로켓이 그 사이에 물린다.
@@ -143,6 +144,9 @@ JAW_TRUSS_BAY = 6.0
 # 판정 높이 자체는 그대로다 — 실제 포획 범위 표시선은 아래 y_arm 에
 # 그대로 남겨 "그려진 것과 판정되는 것"이 어긋나지 않게 한다.
 JAW_Y_OFFSET = 5.0
+# 두 팔의 피봇을 몸통 중앙에서 위아래로 벌린다 — 같은 지점에서 겹치지 않고
+# 바깥에서 시작해 로켓 쪽으로 모이도록. 앞팔은 아래, 뒤팔은 위 피봇.
+JAW_PIVOT_SEP = 7.0
 # 로켓이 이만큼 위로 접근하면 집게가 오므라들기 시작한다. 잡히는 순간에만
 # 닫히면 동작이 보이지 않는다.
 GRIP_APPROACH_RANGE = 75.0
@@ -249,9 +253,11 @@ class Renderer:
         """
         draw_state = self._catch_draw_state(state, outcome, settle)
         if grip is None:
-            # 접근할수록 오므라든다. 잡히면 완전히 문다.
-            grip = (1.0 if outcome == Outcome.SUCCESS
-                    else self._approach_grip(draw_state, target))
+            # 로켓이 다가올수록 점진적으로 오므라든다(순간이동 없이). 성공
+            # 순간에도 근접도 기반 값(팔 높이에서 GRIP_APPROACH_MAX)을 쓰고,
+            # 마지막 완전 닫힘은 마무리 연출(closing_frames)이 이어받는다 —
+            # 성공 프레임에서 1.0으로 튀면 그 뒤 연출과 어긋난다.
+            grip = self._approach_grip(draw_state, target)
 
         # 폭발 시작: 기체 위치에서 본체 조각·화구·파편을 한 번 뿜고 폭심지를
         # 기록한다. 연기는 여기서 한꺼번에 쏟지 않고, 아래에서 여러 프레임에
@@ -657,7 +663,10 @@ class Renderer:
         sign = -1.0 if front else 1.0
         color = JAW_COLOR if front else JAW_BACK_COLOR
         base_y = y_arm + JAW_Y_OFFSET
-        self._truss_line(pivot_x, base_y, tip_x, base_y + sign * spread,
+        # 피봇을 위아래로 벌려 두 팔이 몸통 중앙에서 겹치지 않게 한다. 팔은
+        # 벌어진 피봇에서 시작해 로켓 쪽(팁)으로 모인다.
+        pivot_y = base_y + (-JAW_PIVOT_SEP if front else JAW_PIVOT_SEP)
+        self._truss_line(pivot_x, pivot_y, tip_x, base_y + sign * spread,
                          JAW_TRUSS_HALF, JAW_TRUSS_BAY, color)
 
     def _front_arm(self, target: tuple[float, float], grip: float) -> None:

@@ -140,13 +140,11 @@ class RocketEnv(gym.Env):
         if self._renderer is None:
             from rocket_env.render import Renderer
             self._renderer = Renderer(self.cfg, self.render_mode)
-        # grip은 순전히 연출용이다 — catch 포획이 실제로 성공했을 때만 다
-        # 문 상태(1.0)로 그린다. 대화형으로 써도 닫힌 모습이 보이게 하려는
-        # 목적이라, 학습·평가 루프의 물리에는 영향이 없다.
-        grip = 1.0 if (self.cfg["task"] == "catch"
-                       and self._outcome == Outcome.SUCCESS) else 0.0
+        # grip=None 이면 렌더러가 근접도로 점진적 오므림을 계산한다 — 로켓이
+        # 다가올수록 팔이 서서히 닫혀 순간이동처럼 보이지 않는다. 연출용일
+        # 뿐 물리에는 영향이 없다.
         return self._renderer.draw(self.state, self._target, self._outcome,
-                                   grip=grip, action_info=self._last_action)
+                                   grip=None, action_info=self._last_action)
 
     def close(self):
         if self._renderer is not None:
