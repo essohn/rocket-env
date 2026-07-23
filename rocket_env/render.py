@@ -40,8 +40,11 @@ WIDTH_REF_SCALE = 640.0 / 600.0
 # 폭발이 여러 프레임에 걸쳐 밑둥에서 연기를 계속 뿜으므로(버섯 기둥) 상한을
 # 넉넉히 둔다 — 안 그러면 오래된 연기가 잘려 기둥이 끊긴다.
 MAX_PARTICLES = 1200
-PARTICLE_LIFE = 1.2          # 초 — 연기
+PARTICLE_LIFE = 1.6          # 초 — 연기(상승할 시간을 준다)
 SMOKE_COLOR = (215, 215, 225)
+# 분사 연기의 부력. 분사 속도로 뿜어져 나온 뒤 항력으로 느려지면, 이 완만한
+# 상승 가속으로 "연기처럼" 서서히 위로 피어오른다(폭발 연기보다 약하다).
+SMOKE_RISE = 11.0            # m/s^2
 
 # 폭발 연기의 부력. 항력만 있으면 초기 속도가 1초 안에 죽어 연기가 그 자리에
 # 멈춘다. 매 프레임 위로 가속을 더해 연기가 계속 솟구쳐 기둥을 이루고, 위에서
@@ -53,9 +56,10 @@ SMOKE_BUOYANCY = 26.0        # m/s^2 (연출용 상승 가속)
 DEBRIS_LIFE = 0.35           # 초
 DEBRIS_COLOR = (250, 226, 190)
 
-# 지면 반사. 배기 입자가 지면(y=0)을 뚫고 내려가지 않고 튕겨 좌우로 퍼진다.
-GROUND_BOUNCE_VY = 0.30      # 수직 속도의 반사 계수(위로 약하게 튄다)
-GROUND_SPREAD_VX = 1.6       # 수평 속도 증폭 — 지면을 따라 빠르게 퍼진다
+# 지면 반사. 배기 입자가 지면(y=0)을 뚫고 내려가지 않고, 하강 속도를 땅과
+# 수평인 방향으로 변환해 좌우로 퍼진다.
+GROUND_BOUNCE_VY = 0.18      # 수직 속도 중 위로 약하게 튀는 비율
+GROUND_CONVERT = 0.85        # 하강 속도를 수평(바깥)으로 변환하는 비율
 
 # 바람 먼지. 하늘 전체에 떠서 바람 방향으로 흐르는 입자. 크기·투명도는
 # 나이와 무관하게 고정 — 커지거나 흐려지지 않고 "떠 있는 물체가 이동"하는
@@ -688,12 +692,18 @@ class Renderer:
                 # 부풀린다. 입자마다 값이 달라 유기적으로 퍼진다.
                 if p["y"] - p.get("y0", p["y"]) > 30.0:
                     p["vx"] += p.get("billow", 0.0) * 30.0 * DT
-            # 지면 반사: y<0 으로 내려가지 않고 튕겨 좌우로 퍼진다.
+            # 분사 연기: 분사 속도로 뿜어진 뒤 항력으로 느려지면 완만한 부력으로
+            # "연기처럼" 서서히 위로 피어오른다.
+            elif p["kind"] == "smoke":
+                p["vy"] += SMOKE_RISE * DT
+            # 지면 반사: y<0 으로 내려가지 않고, 하강 속도를 땅과 수평인 방향
+            # (바깥)으로 변환해 옆으로 퍼진다. 위로는 약간만 튄다.
             if p["y"] < 0.0:
-                p["y"] = -p["y"] * 0.25
-                p["vy"] = abs(p["vy"]) * GROUND_BOUNCE_VY
+                speed_down = abs(p["vy"])
+                p["y"] = 0.0
                 outward = 1.0 if p["vx"] >= 0.0 else -1.0
-                p["vx"] = p["vx"] * GROUND_SPREAD_VX + outward * self._rng.uniform(8.0, 30.0)
+                p["vx"] += outward * speed_down * GROUND_CONVERT
+                p["vy"] = speed_down * GROUND_BOUNCE_VY
             p["age"] += DT
         self._particles = [p for p in self._particles
                            if p["age"] <= p["life"]][-MAX_PARTICLES:]
@@ -701,9 +711,12 @@ class Renderer:
     def _emit_particles(self, state: State) -> None:
         if state.thrust <= 0.0:
             return
-        n = int(10 * state.thrust / (2.5 * G))
+        ratio = state.thrust / (2.5 * G)          # 0~1, 추력 세기
+        n = int(10 * ratio)
         if n <= 0:
             return
+        # 분사 속도는 추력에 비례한다 — 강한 분사일수록 배기가 빠르게 뿜어진다.
+        speed_lo, speed_hi = 45.0 + 90.0 * ratio, 75.0 + 150.0 * ratio
 
         nozzle_x, nozzle_y = self._body_to_world(state, 0.0, -ROCKET_HEIGHT / 2.0)
         # 배기 방향: 기체 아래쪽을 phi만큼 꺾은 방향(기체 좌표)을 theta로
@@ -716,7 +729,7 @@ class Renderer:
         base_angle = math.atan2(dir_y, dir_x)
 
         for _ in range(n):
-            speed = self._rng.uniform(40.0, 70.0)
+            speed = self._rng.uniform(speed_lo, speed_hi)
             angle = base_angle + self._rng.uniform(-0.25, 0.25)
             self._particles.append({
                 "x": nozzle_x, "y": nozzle_y,
