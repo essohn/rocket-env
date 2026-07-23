@@ -37,9 +37,14 @@ CAMERA_SMOOTHING = 0.12                            # 0에 가까울수록 부드
 WIDTH_REF_SCALE = 640.0 / 600.0
 
 # --- 연기 입자 ---
-MAX_PARTICLES = 700
+MAX_PARTICLES = 900
 PARTICLE_LIFE = 1.2          # 초 — 연기
 SMOKE_COLOR = (215, 215, 225)
+
+# 폭발 연기의 부력. 항력만 있으면 초기 속도가 1초 안에 죽어 연기가 그 자리에
+# 멈춘다. 매 프레임 위로 가속을 더해 연기가 계속 솟구쳐 기둥을 이루고, 위에서
+# 갓이 부풀어 버섯구름이 된다.
+SMOKE_BUOYANCY = 26.0        # m/s^2 (연출용 상승 가속)
 
 # 부스러기/먼지. 연기와 달리 빠르게 튀어나가 금방 사라진다. 연기만 있으면
 # 배기가 뭉근하게 보여서 추력의 격렬함이 전달되지 않는다.
@@ -50,10 +55,13 @@ DEBRIS_COLOR = (250, 226, 190)
 GROUND_BOUNCE_VY = 0.30      # 수직 속도의 반사 계수(위로 약하게 튄다)
 GROUND_SPREAD_VX = 1.6       # 수평 속도 증폭 — 지면을 따라 빠르게 퍼진다
 
-# 바람 먼지. 지면 근처에 떠서 바람 방향으로 흐르는 옅은 입자.
-DUST_COLOR = (208, 178, 150)
-DUST_LIFE = 2.6              # 초
-DUST_MAX = 90               # 동시에 떠 있는 먼지 상한
+# 바람 먼지. 하늘 전체에 떠서 바람 방향으로 흐르는 입자. 크기·투명도는
+# 나이와 무관하게 고정 — 커지거나 흐려지지 않고 "떠 있는 물체가 이동"하는
+# 효과다. 뷰포트를 벗어나면 반대편으로 감아 하늘을 늘 채운다.
+DUST_COLOR = (206, 180, 154)
+DUST_TARGET = 90            # 하늘에 유지할 먼지 수
+DUST_ALPHA = 95             # 고정 투명도
+DUST_SIZE_PX = 2            # 고정 크기 (화면 픽셀) — 줌과 무관하게 일정한 모트
 
 # 폭발. 접지 속도가 이 값을 넘으면 로켓이 폭발한다.
 EXPLODE_SPEED = 22.0         # m/s
@@ -154,7 +162,9 @@ class Renderer:
         self.render_mode = render_mode
         self.font = pygame.font.SysFont("monospace", 15)
         self.banner_font = pygame.font.SysFont("monospace", 34, bold=True)
-        self.trail: list[tuple[int, int]] = []
+        # 궤적은 월드 좌표로 쌓는다. 픽셀로 저장하면 카메라가 움직여도 선이
+        # 화면 좌표에 붙박여 공중이 아니라 뷰포트에 고정된 것처럼 보인다.
+        self.trail: list[tuple[float, float]] = []
 
         # (중심x, 중심y, 배율). reset()에서 None으로 돌려 다음 에피소드가
         # 평활 없이 즉시 맞춰지게 한다.
@@ -226,7 +236,7 @@ class Renderer:
         self._structure(target, grip)
         self._draw_particles()
 
-        self.trail.append(self._to_px(draw_state.x, draw_state.y))
+        self.trail.append((draw_state.x, draw_state.y))
         # 폭발 중에는 하강 궤적선을 숨긴다 — 파란 선이 불길 위에 남으면 어색하다.
         if boom <= 0.0:
             self._trail()
@@ -303,11 +313,12 @@ class Renderer:
     def _update_camera(self, state: State, target: tuple[float, float],
                        boom: float = 0.0) -> None:
         tx, ty, tscale = self._camera_target(state, target)
-        # 폭발 중에는 시야를 넓혀(줌아웃) 버섯구름과 파편이 다 들어오게 한다.
-        # 배율을 최대 45% 줄이고, 중심을 위로 올려 피어오르는 구름을 담는다.
+        # 폭발 중에는 시야를 넓혀(줌아웃) 솟구치는 버섯구름이 다 들어오게
+        # 한다. 배율을 최대 65% 줄이고 중심을 크게 위로 올려, 기둥이 오르는
+        # 만큼 화면도 따라 올라간다.
         if boom > 0.0:
-            tscale = max(MIN_SCALE, tscale * (1.0 - 0.45 * boom))
-            ty = ty + 55.0 * boom
+            tscale = max(MIN_SCALE, tscale * (1.0 - 0.65 * boom))
+            ty = ty + 190.0 * boom
         if self._cam is None:
             self._cam = (tx, ty, tscale)
             return
@@ -586,7 +597,10 @@ class Renderer:
     def _trail(self) -> None:
         if len(self.trail) < 2:
             return
-        pygame.draw.lines(self.surface, TRAIL_COLOR, False, self.trail[-400:],
+        # 월드 좌표를 매 프레임 현재 카메라로 픽셀 변환한다 — 그래야 궤적이
+        # 공중(월드)에 고정되어 카메라가 움직이면 함께 흐른다.
+        pts = [self._to_px(x, y) for x, y in self.trail[-400:]]
+        pygame.draw.lines(self.surface, TRAIL_COLOR, False, pts,
                           self._scaled_width(2.0, min_px=1))
 
     # --- 연기 입자 ---
@@ -602,7 +616,30 @@ class Renderer:
         if boom <= 0.0:
             self._emit_particles(state)
         self._emit_dust(state.wind_x)
+        cam = self._cam
         for p in self._particles:
+            # 바람 먼지: 바람 속도로만 흐르고(드래그·중력·페이드 없음),
+            # 뷰포트를 벗어나면 반대편으로 감아 하늘을 늘 채운다.
+            if p["kind"] == "dust":
+                p["vx"] = state.wind_x
+                p["x"] += p["vx"] * DT
+                if cam is not None:
+                    cx, cy, scale = cam
+                    hw = (WIDTH / 2.0) / scale + 6.0
+                    hh = (HEIGHT / 2.0) / scale + 6.0
+                    if p["x"] > cx + hw:
+                        p["x"] = cx - hw
+                        p["y"] = cy + self._rng.uniform(-hh, hh)
+                    elif p["x"] < cx - hw:
+                        p["x"] = cx + hw
+                        p["y"] = cy + self._rng.uniform(-hh, hh)
+                    if p["y"] > cy + hh:
+                        p["y"] = max(2.0, cy - hh)
+                        p["x"] = cx + self._rng.uniform(-hw, hw)
+                    elif p["y"] < cy - hh:
+                        p["y"] = cy + hh
+                        p["x"] = cx + self._rng.uniform(-hw, hw)
+                continue
             p["x"] += p["vx"] * DT
             p["y"] += p["vy"] * DT
             p["vx"] *= self._DRAG.get(p["kind"], 0.95)
@@ -610,13 +647,14 @@ class Renderer:
             # 본체 조각·파편은 중력으로 포물선을 그리며 떨어진다(연출용).
             if p["kind"] in ("frag", "boom_debris"):
                 p["vy"] -= 70.0 * DT
-            # 바람 먼지는 매 프레임 바람 쪽으로 다시 끌린다 — 안 그러면 드래그로
-            # 금방 멈춰 바람 방향이 안 보인다.
-            if p["kind"] == "dust":
-                p["vx"] += (state.wind_x - p["vx"]) * 0.08
-            # 지면 반사: y<0 으로 내려가지 않고 튕겨 좌우로 퍼진다. 먼지는
-            # 원래 지면에 붙어 흐르므로 제외한다.
-            if p["y"] < 0.0 and p["kind"] != "dust":
+            # 폭발 연기는 부력으로 계속 솟구쳐 버섯구름 기둥을 이룬다.
+            elif p["kind"] == "boom_smoke":
+                p["vy"] += SMOKE_BUOYANCY * DT
+                # 충분히 솟은 연기는 바깥으로 말려 갓(cap)을 부풀린다.
+                if p.get("cap") and p["y"] - p["y0"] > 30.0:
+                    p["vx"] += p["cap"] * 26.0 * DT
+            # 지면 반사: y<0 으로 내려가지 않고 튕겨 좌우로 퍼진다.
+            if p["y"] < 0.0:
                 p["y"] = -p["y"] * 0.25
                 p["vy"] = abs(p["vy"]) * GROUND_BOUNCE_VY
                 outward = 1.0 if p["vx"] >= 0.0 else -1.0
@@ -663,29 +701,24 @@ class Renderer:
             })
 
     def _emit_dust(self, wind_x: float) -> None:
-        """지면 근처에 바람 방향으로 흐르는 먼지를 뿌린다.
+        """하늘 전체(현재 뷰포트)에 바람 방향으로 흐르는 먼지를 채운다.
 
-        바람이 셀수록 더 자주, 더 빠르게 흐른다. 카메라가 지면을 볼 때만
-        뿌려 화면 밖 낭비를 막는다.
+        DUST_TARGET 개를 유지한다. 이미 채워져 있으면 이동·감기는
+        _update_particles 가 맡으므로 여기서는 부족분만 뿌린다. 지면 위쪽
+        (y>=2)에만 둔다.
         """
         if abs(wind_x) < 0.5 or self._cam is None:
             return
         cx, cy, scale = self._cam
-        _, ground_py = self._to_px(0.0, 0.0)
-        if ground_py < -40 or ground_py > HEIGHT + 200:
-            return  # 지면이 화면에 없으면 먼지도 안 보인다
+        hw = (WIDTH / 2.0) / scale
+        hh = (HEIGHT / 2.0) / scale
         n_dust = sum(1 for p in self._particles if p["kind"] == "dust")
-        if n_dust >= DUST_MAX:
-            return
-        half_w_world = (WIDTH / 2.0) / scale
-        rate = min(4, 1 + int(abs(wind_x) / 4.0))
-        for _ in range(rate):
+        for _ in range(min(8, DUST_TARGET - n_dust)):
             self._particles.append({
-                "x": cx + self._rng.uniform(-half_w_world, half_w_world),
-                "y": self._rng.uniform(1.0, 45.0),
-                "vx": wind_x * self._rng.uniform(1.0, 2.2),
-                "vy": self._rng.uniform(-2.0, 3.0),
-                "age": 0.0, "kind": "dust", "life": DUST_LIFE,
+                "x": cx + self._rng.uniform(-hw, hw),
+                "y": max(2.0, cy + self._rng.uniform(-hh, hh)),
+                "vx": wind_x, "vy": 0.0,
+                "age": 0.0, "kind": "dust", "life": 1e9,
             })
 
     def _emit_explosion(self, state: State) -> None:
@@ -727,22 +760,25 @@ class Renderer:
                 "age": 0.0, "kind": "boom_fire", "life": rng.uniform(0.3, 0.65),
             })
 
-        # 버섯구름 기둥(stem): 좁고 곧게 솟는다.
-        for _ in range(70):
+        # 버섯구름 기둥(stem): 좁고 곧게 솟는다. cap=0 이라 옆으로 말리지 않고
+        # 부력으로 계속 위로 오른다.
+        for _ in range(110):
             self._particles.append({
-                "x": ix + rng.uniform(-5, 5), "y": iy + rng.uniform(0, 8),
-                "vx": rng.uniform(-8, 8), "vy": rng.uniform(45, 110),
-                "age": 0.0, "kind": "boom_smoke", "life": rng.uniform(1.8, 3.0),
+                "x": ix + rng.uniform(-5, 5), "y": iy + rng.uniform(0, 10),
+                "vx": rng.uniform(-6, 6), "vy": rng.uniform(55, 130),
+                "y0": iy, "cap": 0.0,
+                "age": 0.0, "kind": "boom_smoke", "life": rng.uniform(6.0, 10.0),
             })
-        # 버섯구름 갓(cap): 기둥 위에서 좌우로 부푼다 — 위로 솟다 옆으로 퍼진다.
-        for _ in range(90):
-            ang = rng.uniform(0, 2 * math.pi)
-            r = rng.uniform(0.4, 1.0)
+        # 버섯구름 갓(cap): 기둥과 함께 솟다가, 충분히 오르면 좌우로 말려
+        # 부푼다(_update_particles 의 cap 로직). 왼쪽 절반은 왼쪽으로, 오른쪽
+        # 절반은 오른쪽으로 말리도록 부호를 준다.
+        for _ in range(150):
+            side = -1.0 if rng.random() < 0.5 else 1.0
             self._particles.append({
-                "x": ix + math.cos(ang) * 14 * r, "y": iy + rng.uniform(30, 55),
-                "vx": math.cos(ang) * rng.uniform(20, 70),
-                "vy": rng.uniform(8, 45),
-                "age": 0.0, "kind": "boom_smoke", "life": rng.uniform(1.8, 3.0),
+                "x": ix + side * rng.uniform(1, 12), "y": iy + rng.uniform(6, 26),
+                "vx": side * rng.uniform(2, 14), "vy": rng.uniform(45, 100),
+                "y0": iy, "cap": side,
+                "age": 0.0, "kind": "boom_smoke", "life": rng.uniform(6.0, 11.0),
             })
 
         # 파편: 전방향, 빠르고 멀리.
@@ -756,8 +792,12 @@ class Renderer:
             })
 
     def _flash(self, boom: float) -> None:
-        """폭발 순간 화면을 덮는 섬광. 초반에 밝고 빠르게 사라진다."""
-        alpha = int(235 * max(0.0, 1.0 - boom * 2.6))
+        """폭발 순간 화면을 덮는 섬광. 초반에 밝고 빠르게 사라진다.
+
+        boom 이 길어져도(폭발 5배) 섬광은 첫 0.7초쯤에만 번쩍이도록 boom 에
+        큰 계수를 곱해 빠르게 뗀다.
+        """
+        alpha = int(235 * max(0.0, 1.0 - boom * 14.0))
         if alpha <= 0:
             return
         overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
@@ -776,8 +816,10 @@ class Renderer:
                 radius_px = max(1, int((2.0 + 14.0 * frac) * scale))
                 color = (*SMOKE_COLOR, int(170 * (1.0 - frac) ** 1.5))
             elif kind == "dust":
-                radius_px = max(1, int((1.0 + 2.5 * frac) * scale))
-                color = (*DUST_COLOR, int(120 * (1.0 - frac)))
+                # 크기·투명도 고정 — 나이·줌과 무관하다. 커지거나 흐려지지
+                # 않고 일정한 모트가 바람 따라 이동하는 효과.
+                radius_px = DUST_SIZE_PX
+                color = (*DUST_COLOR, DUST_ALPHA)
             elif kind == "boom_smoke":
                 # 크게 부풀며 천천히 흐려지는 검은 버섯구름
                 radius_px = max(2, int((4.0 + 26.0 * frac) * scale))

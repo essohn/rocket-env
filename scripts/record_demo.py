@@ -39,9 +39,9 @@ from rocket_env.config import PRESETS
 from rocket_env.render import EXPLODE_SPEED, GRIP_APPROACH_MAX
 from rocket_env.types import Outcome
 
-# 빠른 충돌 폭발 연출 길이(프레임). fps=20 기준 약 2초에 걸쳐 화구·버섯
-# 구름이 피어올랐다 흩어진다.
-BOOM_FRAMES = 40
+# 빠른 충돌 폭발 연출 길이(프레임). 버섯구름이 부력으로 끝까지 솟구쳐
+# 갓을 형성하도록 넉넉히 잡는다 — 30fps 기준 약 6.7초.
+BOOM_FRAMES = 200
 
 EVAL_EPISODE_COUNT_DEFAULT = 20
 ARTIFACTS_DIR = Path(__file__).resolve().parent.parent / "artifacts"
