@@ -260,6 +260,12 @@ class Renderer:
         self._draw_clouds(front=True)
         if boom > 0.0:
             self._shockwave(boom)
+        # 지면 오클루더: 땅/바다를 z 최상단으로 올려 지표 아래로 삐져나온 모든
+        # 효과·객체(충격파 링·파편·화염·연기)를 가린다. 지표선인 착륙 패드만
+        # 그 위에 다시 그려 살린다.
+        self._ground()
+        self._pad(target)
+        if boom > 0.0:
             self._flash(boom)
         self._hud(state)
 
@@ -451,13 +457,18 @@ class Renderer:
                 self.surface, GROUND_COLOR,
                 pygame.Rect(0, ground_top, WIDTH, HEIGHT - ground_top))
 
+    def _pad(self, target: tuple[float, float]) -> None:
+        """착륙 패드 표시선. 지표선(y=0)이라 지면 오클루더 위에 다시 그린다."""
+        if self.cfg["task"] != "landing":
+            return
+        radius = self.cfg["success"]["zone_r"]
+        pygame.draw.line(self.surface, PAD_COLOR,
+                         self._to_px(-radius, 0.0), self._to_px(radius, 0.0),
+                         self._scaled_width(6.0))
+
     def _structure(self, target: tuple[float, float], grip: float) -> None:
         if self.cfg["task"] == "landing":
-            radius = self.cfg["success"]["zone_r"]
-            left = self._to_px(-radius, 0.0)
-            right = self._to_px(radius, 0.0)
-            pygame.draw.line(self.surface, PAD_COLOR, left, right,
-                             self._scaled_width(6.0))
+            self._pad(target)
             return
 
         x_tower, y_arm, arm_half, window_half = self._catch_geometry(target)
