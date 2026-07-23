@@ -28,6 +28,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # 동일해지는 버그가 생긴다.
     "seed": None,
 
+    # 로켓 몸통에 세로로 새길 문구(순전히 연출용, 물리·보상 무관). 학생이
+    # 자기 별명을 넣을 수 있다. 로켓 길이를 넘는 글자는 렌더러가 잘라낸다.
+    "livery": "YONSEI인이활",
+
     "wind": {
         "mode": "constant",   # "none" | "constant" | "gust"
         "max_speed": 8.0,

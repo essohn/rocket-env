@@ -170,6 +170,9 @@ FIN_COLOR = (120, 125, 135)
 TRAIL_COLOR = (120, 180, 230)
 TRAIL_ALPHA = 70            # 궤적 투명도 — 낮을수록 옅다
 HUD_COLOR = (225, 230, 240)
+HUD_SPEED_MAX = 50.0        # 속도 막대가 가득 차는(레드) 기준 속도 (m/s)
+# 로켓 도색에 세로로 넣을 수 있는 최대 글자 수. 넘으면 잘라 로켓 영역까지만.
+MAX_LIVERY_CHARS = 9
 LIVERY_COLOR = (40, 60, 120)
 
 BANNER_TEXT = {
@@ -1045,11 +1048,16 @@ class Renderer:
         self._flame(state)
 
     def _build_livery(self) -> pygame.Surface:
-        """세로로 읽히는 기체 도색 "YONSEI인이활". 한 번만 만든다.
-        한글이 섞이므로 한글 지원 폰트를 쓴다(없으면 두부, 데모용 장식)."""
+        """세로로 읽히는 기체 도색. 문구는 cfg["livery"](학생 별명 등)에서 온다.
+        로켓 길이를 넘는 글자는 잘라낸다(MAX_LIVERY_CHARS). 한글이 섞일 수
+        있어 한글 지원 폰트를 쓴다(없으면 두부, 데모용 장식)."""
+        text = str(self.cfg.get("livery", "YONSEI인이활"))[:MAX_LIVERY_CHARS]
+        self._livery_nglyphs = max(1, len(text))
+        if not text:
+            return pygame.Surface((1, 1), pygame.SRCALPHA)
         font = pygame.font.SysFont(
             "applesdgothicneo,applegothic,arialunicode,helvetica", 34, bold=True)
-        glyphs = [font.render(ch, True, LIVERY_COLOR) for ch in "YONSEI인이활"]
+        glyphs = [font.render(ch, True, LIVERY_COLOR) for ch in text]
         w = max(g.get_width() for g in glyphs)
         h = sum(g.get_height() for g in glyphs)
         surf = pygame.Surface((w, h), pygame.SRCALPHA)
@@ -1060,8 +1068,13 @@ class Renderer:
         return surf
 
     def _paint_livery(self, state: State) -> None:
+        if self._livery.get_height() <= 1:
+            return
         _, _, scale = self._cam
-        zoom = (ROCKET_HEIGHT * 0.66 * scale) / self._livery.get_height()
+        # 글자 하나의 세계 높이를 고정한다 — 별명이 짧으면 글자 수만 줄고 크기는
+        # 일정하다. 긴 별명은 build 에서 이미 잘라내(로켓 영역까지만) 있다.
+        target_world_h = self._livery_nglyphs * (ROCKET_HEIGHT * 0.088)
+        zoom = (target_world_h * scale) / self._livery.get_height()
         if zoom <= 0.05:
             return
         # body_to_px가 만드는 노즈 방향(화면 벡터)은 (-sinθ, -cosθ)다.
@@ -1140,12 +1153,34 @@ class Renderer:
         ]
         # 석양 배경은 밝아서 흰 글씨가 묻힌다. 반투명 판을 먼저 깐다 —
         # 배경이 비치도록 옅게(알파 90). 폭을 절반(330→160)으로 줄였다.
-        panel = pygame.Surface((160, 18 + len(lines) * 18), pygame.SRCALPHA)
+        pw = 160
+        panel = pygame.Surface((pw, 18 + len(lines) * 18), pygame.SRCALPHA)
         panel.fill((10, 12, 24, 90))
-        self.surface.blit(panel, (6, 6))
+        # 속도·연료는 글씨 뒤에 막대그래프를 깐다. 속도는 저속 그린→고속 레드,
+        # 연료는 많으면 그린→적으면 레드. (막대 → 글씨 순으로 그려 글씨가 위에)
+        bar_w = pw - 12
+        s_frac = min(max(speed / HUD_SPEED_MAX, 0.0), 1.0)
+        f_frac = (1.0 if capacity is None
+                  else min(max(state.fuel / capacity, 0.0), 1.0))
+        self._hud_bar(panel, 1, bar_w, s_frac, self._grade_color(s_frac))
+        self._hud_bar(panel, 3, bar_w, f_frac, self._grade_color(1.0 - f_frac))
         for i, line in enumerate(lines):
-            self.surface.blit(
-                self.font.render(line, True, HUD_COLOR), (12, 11 + i * 18))
+            panel.blit(self.font.render(line, True, HUD_COLOR), (6, 5 + i * 18))
+        self.surface.blit(panel, (6, 6))
+
+    @staticmethod
+    def _grade_color(t: float) -> tuple[int, int, int]:
+        """t=0 그린 → t=1 레드 (중간은 노랑). 속도·연료 막대 색."""
+        t = min(max(t, 0.0), 1.0)
+        green, yellow, red = (70, 195, 90), (225, 200, 70), (222, 70, 58)
+        a, b, u = (green, yellow, t / 0.5) if t < 0.5 else (yellow, red, (t - 0.5) / 0.5)
+        return tuple(int(a[i] + (b[i] - a[i]) * u) for i in range(3))
+
+    def _hud_bar(self, panel, line_idx: int, bar_w: int, frac: float, color) -> None:
+        """HUD 한 줄의 글씨 뒤에 값 비례 막대를 그린다(반투명)."""
+        y = 4 + line_idx * 18
+        w = max(1, int(bar_w * min(max(frac, 0.0), 1.0)))
+        pygame.draw.rect(panel, (*color, 150), pygame.Rect(4, y, w, 16))
 
     def _action_panel(self, action_info) -> None:
         """우측 상단에 행동 공간(5 추력 × 3 노즐) 격자를 그려, 정책이 고른
