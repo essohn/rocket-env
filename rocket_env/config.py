@@ -136,37 +136,49 @@ PRESETS: dict[str, dict[str, Any]] = {
                  "x_range": [-30.0, 30.0], "theta_range_deg": [-5.0, 5.0],
                  "omega_abs_range_deg": [6.0, 10.0]},
     },
-    # + 자세 보정: 초기 기울기가 성공 임계(±10°)를 크게 벗어난다.
+    # + 자세 보정 & 착륙 데미지 채점. 기울기가 성공 임계(±10°)를 벗어나고,
+    # 접근 속도가 빨라지며(vy -28), 착륙 데미지가 엄격해진다: 접지 속도 임계
+    # v_max 12, 데미지 민감도 soft_v_ref 2.5(작을수록 같은 충격이 더 큰 감점).
+    # 여기부터는 바닐라 DQN 이 학습하지 못해(0%) PPO+정규화가 필요하므로,
+    # 난이도를 올려도 DQN 입문 라운드(basic)를 깨지 않는다.
     "landing-attitude": {
         "task": "landing",
         "wind": {"mode": "none", "max_speed": 0.0},
         "fuel": {"capacity": None},
-        "init": {"y": 300.0, "vy_range": [-25.0, -25.0],
+        "success": {"v_max": 12.0},
+        "reward": {"soft_v_ref": 2.5, "success_soft": 150.0},
+        "init": {"y": 300.0, "vy_range": [-28.0, -28.0],
                  "x_range": [-30.0, 30.0], "theta_range_deg": [-20.0, 20.0],
                  "omega_abs_range_deg": [6.0, 10.0]},
     },
-    # + 고도 상승: 여기서부터 낙하 구간이 길어져 바닐라 DQN 의 신용 할당이
-    # 무너지기 시작한다. PPO+정규화 급 셋업이 필요해지는 문턱이다.
+    # + 고도 상승 & 데미지 강화: 낙하 구간이 길고 접근 속도(vy -40)가 빨라
+    # 제동을 더 일찍 정확히 시작해야 하며, 착륙 데미지 채점이 엄격하다
+    # (v_max 10, soft_v_ref 2.0).
     "landing-descent": {
         "task": "landing",
         "wind": {"mode": "none", "max_speed": 0.0},
         "fuel": {"capacity": None},
-        "init": {"y": 550.0, "vy_range": [-35.0, -35.0],
+        "success": {"v_max": 10.0},
+        "reward": {"soft_v_ref": 2.0, "success_soft": 160.0},
+        "init": {"y": 550.0, "vy_range": [-40.0, -40.0],
                  "x_range": [-60.0, 60.0], "theta_range_deg": [-20.0, 20.0],
                  "omega_abs_range_deg": [8.0, 12.0]},
     },
-    # + 외란: 에피소드 내내 일정한 옆바람.
+    # + 외란: 에피소드 내내 일정한 옆바람. 데미지 채점 더 엄격(v_max 9).
     "landing-wind": {
         "task": "landing",
         "wind": {"mode": "constant", "max_speed": 8.0},
         "fuel": {"capacity": None},
-        "init": {"y": 550.0, "vy_range": [-35.0, -35.0],
+        "success": {"v_max": 9.0},
+        "reward": {"soft_v_ref": 2.0, "success_soft": 160.0},
+        "init": {"y": 550.0, "vy_range": [-40.0, -40.0],
                  "x_range": [-60.0, 60.0], "theta_range_deg": [-25.0, 25.0],
                  "omega_abs_range_deg": [8.0, 12.0]},
     },
     # + 고고도·불확실성·자원: 사실적 고고도 낙하에 돌풍과 유한 연료가 겹친다.
     # 이 라운드가 시네마틱 데모(y≈1400)에 가장 가까운 '진짜 로켓 착륙'이며,
-    # PPO+정규화로도 성공률이 낮은 상위권 도전 과제다.
+    # 착륙 데미지 채점이 가장 엄격하다(v_max 8, soft_v_ref 1.5). PPO+정규화로도
+    # 성공률이 낮은 상위권 도전 과제다.
     "landing-gust": {
         "task": "landing",
         "wind": {"mode": "gust", "max_speed": 12.0,
@@ -174,7 +186,9 @@ PRESETS: dict[str, dict[str, Any]] = {
         # 최대 소모는 fuel_cost(2.5g) * max_steps = 0.125 * 800 = 100 이다.
         # 70 은 그 상한보다 낮아 소모 관리가 실제로 필요하다.
         "fuel": {"capacity": 70.0},
-        "init": {"y": 800.0, "vy_range": [-40.0, -40.0],
+        "success": {"v_max": 8.0},
+        "reward": {"soft_v_ref": 1.5, "success_soft": 180.0},
+        "init": {"y": 800.0, "vy_range": [-45.0, -45.0],
                  "x_range": [-90.0, 90.0], "theta_range_deg": [-30.0, 30.0],
                  "omega_abs_range_deg": [10.0, 14.0]},
     },

@@ -61,10 +61,11 @@ def test_shaping_total_is_independent_of_episode_length():
 
 
 def test_perfect_landing_scores_near_the_maximum():
-    # failure_max(40) + success_soft(140) + success_position(20) + success_fuel(20)
+    # landing-descent 는 착륙 데미지 채점이 엄격해 success_soft 160 이다.
+    # failure_max(40) + success_soft(160) + success_position(20) + success_fuel(20)
     r = terminal_reward(Outcome.SUCCESS, at(x=0.0, y=25.0, step=0),
                         TARGET, CFG, fuel_frac=1.0)
-    assert r == pytest.approx(220.0, abs=0.5)
+    assert r == pytest.approx(240.0, abs=0.5)
 
 
 def test_marginal_success_still_beats_every_failure():
