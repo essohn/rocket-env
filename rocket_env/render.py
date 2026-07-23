@@ -46,6 +46,22 @@ SMOKE_COLOR = (215, 215, 225)
 DEBRIS_LIFE = 0.35           # 초
 DEBRIS_COLOR = (250, 226, 190)
 
+# 지면 반사. 배기 입자가 지면(y=0)을 뚫고 내려가지 않고 튕겨 좌우로 퍼진다.
+GROUND_BOUNCE_VY = 0.30      # 수직 속도의 반사 계수(위로 약하게 튄다)
+GROUND_SPREAD_VX = 1.6       # 수평 속도 증폭 — 지면을 따라 빠르게 퍼진다
+
+# 바람 먼지. 지면 근처에 떠서 바람 방향으로 흐르는 옅은 입자.
+DUST_COLOR = (208, 178, 150)
+DUST_LIFE = 2.6              # 초
+DUST_MAX = 90               # 동시에 떠 있는 먼지 상한
+
+# 폭발. 접지 속도가 이 값을 넘으면 로켓이 폭발한다.
+EXPLODE_SPEED = 22.0         # m/s
+BOOM_SMOKE_COLOR = (60, 52, 50)     # 버섯구름 — 검은 연기
+BOOM_FIRE_COLOR = (255, 150, 60)    # 화구
+BOOM_CORE_COLOR = (255, 244, 210)   # 섬광 코어
+FLASH_COLOR = (255, 246, 226)       # 순간 섬광
+
 # --- 구름 ---
 # 배경이 단색 그라디언트뿐이면 34 m/s 로 떨어지든 2 m/s 로 기어가든 화면상
 # 차이가 없다. 구름을 월드 좌표에 고정해 두면 카메라가 내려가며 스쳐
@@ -144,6 +160,7 @@ class Renderer:
         # 평활 없이 즉시 맞춰지게 한다.
         self._cam: tuple[float, float, float] | None = None
         self._particles: list[dict] = []
+        self._boomed = False
         self._rng = np.random.default_rng()
 
         if render_mode == "human":
@@ -169,14 +186,20 @@ class Renderer:
         self.trail = []
         self._cam = None
         self._particles = []
+        self._boomed = False
 
     def draw(self, state: State, target: tuple[float, float],
-             outcome: str, grip: float | None = None, settle: float = 0.0):
+             outcome: str, grip: float | None = None, settle: float = 0.0,
+             boom: float = 0.0):
         """한 프레임을 그린다.
 
         `grip`은 순전히 연출용 상태다(0=벌어짐, 1=다 묾) — 물리에는
         전혀 관여하지 않는다. 기본값 0.0이라 기존 호출부(테스트 등)는
         그대로 동작한다.
+
+        `boom`(0~1)은 폭발 연출 진행도다. 0보다 크면 로켓이 폭발한 상태로,
+        첫 프레임에 화구·버섯구름·파편을 뿜고 카메라가 줌아웃하며 섬광이
+        화면을 덮는다. 착지 속도가 빠른 실패에서만 쓴다.
         """
         draw_state = self._catch_draw_state(state, outcome, settle)
         if grip is None:
@@ -184,8 +207,15 @@ class Renderer:
             grip = (1.0 if outcome == Outcome.SUCCESS
                     else self._approach_grip(draw_state, target))
 
-        self._update_camera(draw_state, target)
-        self._update_particles(draw_state)
+        # 폭발 시작: 충돌 지점에서 한 번만 파편을 뿜는다.
+        if boom > 0.0 and not self._boomed:
+            impact_x = draw_state.x
+            impact_y = max(0.0, draw_state.y - ROCKET_HEIGHT / 2.0)
+            self._emit_explosion(impact_x, impact_y)
+            self._boomed = True
+
+        self._update_camera(draw_state, target, boom)
+        self._update_particles(draw_state, boom)
 
         self.surface.blit(self._sky_surface, (0, 0))
         self._draw_clouds(front=False)      # 원경 구름 — 배경
@@ -194,12 +224,18 @@ class Renderer:
         self._draw_particles()
 
         self.trail.append(self._to_px(draw_state.x, draw_state.y))
-        self._trail()
-        self._rocket(draw_state)
+        # 폭발 중에는 하강 궤적선을 숨긴다 — 파란 선이 불길 위에 남으면 어색하다.
+        if boom <= 0.0:
+            self._trail()
+        # 폭발이 무르익으면 기체는 산산조각 나 더는 그리지 않는다.
+        if boom < 0.2:
+            self._rocket(draw_state)
         self._front_arm(target, grip)
         # 전경 구름은 로켓보다 카메라에 가까우므로 기체 위에 덮인다.
         # 가끔 로켓을 스쳐 지나가며 깊이감을 만든다.
         self._draw_clouds(front=True)
+        if boom > 0.0:
+            self._flash(boom)
         self._hud(state)
 
         if outcome != Outcome.IN_PROGRESS:
@@ -260,13 +296,20 @@ class Renderer:
         scale = min(WIDTH / span_x, HEIGHT / span_y)
         return cx, cy, min(max(scale, MIN_SCALE), MAX_SCALE)
 
-    def _update_camera(self, state: State, target: tuple[float, float]) -> None:
+    def _update_camera(self, state: State, target: tuple[float, float],
+                       boom: float = 0.0) -> None:
         tx, ty, tscale = self._camera_target(state, target)
+        # 폭발 중에는 시야를 넓혀(줌아웃) 버섯구름과 파편이 다 들어오게 한다.
+        # 배율을 최대 45% 줄이고, 중심을 위로 올려 피어오르는 구름을 담는다.
+        if boom > 0.0:
+            tscale = max(MIN_SCALE, tscale * (1.0 - 0.45 * boom))
+            ty = ty + 55.0 * boom
         if self._cam is None:
             self._cam = (tx, ty, tscale)
             return
         cx, cy, cscale = self._cam
-        k = CAMERA_SMOOTHING
+        # 폭발 순간의 줌아웃은 평소 평활보다 빠르게 따라가야 시원하게 벌어진다.
+        k = CAMERA_SMOOTHING if boom <= 0.0 else min(0.35, CAMERA_SMOOTHING + 0.2 * boom)
         self._cam = (cx + (tx - cx) * k, cy + (ty - cy) * k,
                      cscale + (tscale - cscale) * k)
 
@@ -544,14 +587,32 @@ class Renderer:
 
     # --- 연기 입자 ---
 
-    def _update_particles(self, state: State) -> None:
-        self._emit_particles(state)
+    # 입자 종류별 공기 저항. 연기·버섯구름은 뭉근하게 느려지고, 파편은
+    # 관성으로 멀리 날며, 먼지는 바람에 실려 천천히 흐른다.
+    _DRAG = {"smoke": 0.88, "debris": 0.97, "dust": 0.94,
+             "boom_smoke": 0.90, "boom_fire": 0.85, "boom_debris": 0.96}
+
+    def _update_particles(self, state: State, boom: float = 0.0) -> None:
+        # 폭발한 뒤에는 엔진 배기를 더 뿜지 않는다 — 기체가 이미 사라졌다.
+        if boom <= 0.0:
+            self._emit_particles(state)
+        self._emit_dust(state.wind_x)
         for p in self._particles:
             p["x"] += p["vx"] * DT
             p["y"] += p["vy"] * DT
-            drag = 0.88 if p["kind"] == "smoke" else 0.97
-            p["vx"] *= drag
-            p["vy"] *= drag
+            p["vx"] *= self._DRAG.get(p["kind"], 0.95)
+            p["vy"] *= self._DRAG.get(p["kind"], 0.95)
+            # 바람 먼지는 매 프레임 바람 쪽으로 다시 끌린다 — 안 그러면 드래그로
+            # 금방 멈춰 바람 방향이 안 보인다.
+            if p["kind"] == "dust":
+                p["vx"] += (state.wind_x - p["vx"]) * 0.08
+            # 지면 반사: y<0 으로 내려가지 않고 튕겨 좌우로 퍼진다. 먼지는
+            # 원래 지면에 붙어 흐르므로 제외한다.
+            if p["y"] < 0.0 and p["kind"] != "dust":
+                p["y"] = -p["y"] * 0.25
+                p["vy"] = abs(p["vy"]) * GROUND_BOUNCE_VY
+                outward = 1.0 if p["vx"] >= 0.0 else -1.0
+                p["vx"] = p["vx"] * GROUND_SPREAD_VX + outward * self._rng.uniform(8.0, 30.0)
             p["age"] += DT
         self._particles = [p for p in self._particles
                            if p["age"] <= p["life"]][-MAX_PARTICLES:]
@@ -559,7 +620,7 @@ class Renderer:
     def _emit_particles(self, state: State) -> None:
         if state.thrust <= 0.0:
             return
-        n = int(10 * state.thrust / (2.0 * G))
+        n = int(10 * state.thrust / (2.5 * G))
         if n <= 0:
             return
 
@@ -593,6 +654,75 @@ class Renderer:
                 "age": 0.0, "kind": "debris", "life": DEBRIS_LIFE,
             })
 
+    def _emit_dust(self, wind_x: float) -> None:
+        """지면 근처에 바람 방향으로 흐르는 먼지를 뿌린다.
+
+        바람이 셀수록 더 자주, 더 빠르게 흐른다. 카메라가 지면을 볼 때만
+        뿌려 화면 밖 낭비를 막는다.
+        """
+        if abs(wind_x) < 0.5 or self._cam is None:
+            return
+        cx, cy, scale = self._cam
+        _, ground_py = self._to_px(0.0, 0.0)
+        if ground_py < -40 or ground_py > HEIGHT + 200:
+            return  # 지면이 화면에 없으면 먼지도 안 보인다
+        n_dust = sum(1 for p in self._particles if p["kind"] == "dust")
+        if n_dust >= DUST_MAX:
+            return
+        half_w_world = (WIDTH / 2.0) / scale
+        rate = min(4, 1 + int(abs(wind_x) / 4.0))
+        for _ in range(rate):
+            self._particles.append({
+                "x": cx + self._rng.uniform(-half_w_world, half_w_world),
+                "y": self._rng.uniform(1.0, 45.0),
+                "vx": wind_x * self._rng.uniform(1.0, 2.2),
+                "vy": self._rng.uniform(-2.0, 3.0),
+                "age": 0.0, "kind": "dust", "life": DUST_LIFE,
+            })
+
+    def _emit_explosion(self, x: float, y: float) -> None:
+        """충돌 지점에서 화구·버섯구름·파편을 한 번에 뿜는다.
+
+        - 버섯구름: 위쪽으로 솟구쳤다 항력에 눌려 좌우로 부푸는 검은 연기.
+        - 화구: 짧게 타오르는 밝은 주황 코어.
+        - 파편: 전방향으로 빠르게 튀는 밝은 조각.
+        """
+        rng = self._rng
+        for _ in range(150):     # 버섯구름 연기: 위쪽 반구로 솟는다
+            ang = rng.uniform(math.pi * 0.15, math.pi * 0.85)   # 위쪽
+            spd = rng.uniform(18.0, 95.0)
+            self._particles.append({
+                "x": x + rng.uniform(-6, 6), "y": y + rng.uniform(0, 6),
+                "vx": spd * math.cos(ang), "vy": spd * math.sin(ang),
+                "age": 0.0, "kind": "boom_smoke",
+                "life": rng.uniform(1.6, 2.8),
+            })
+        for _ in range(70):      # 화구: 밝고 짧다
+            ang = rng.uniform(0, 2 * math.pi)
+            spd = rng.uniform(20.0, 130.0)
+            self._particles.append({
+                "x": x, "y": y + 2.0,
+                "vx": spd * math.cos(ang), "vy": abs(spd * math.sin(ang)) * 0.9,
+                "age": 0.0, "kind": "boom_fire", "life": rng.uniform(0.35, 0.7),
+            })
+        for _ in range(110):     # 파편: 전방향, 빠르고 멀리
+            ang = rng.uniform(0, 2 * math.pi)
+            spd = rng.uniform(120.0, 340.0)
+            self._particles.append({
+                "x": x, "y": y + 1.0,
+                "vx": spd * math.cos(ang), "vy": spd * math.sin(ang),
+                "age": 0.0, "kind": "boom_debris", "life": rng.uniform(0.5, 1.1),
+            })
+
+    def _flash(self, boom: float) -> None:
+        """폭발 순간 화면을 덮는 섬광. 초반에 밝고 빠르게 사라진다."""
+        alpha = int(235 * max(0.0, 1.0 - boom * 2.6))
+        if alpha <= 0:
+            return
+        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        overlay.fill((*FLASH_COLOR, alpha))
+        self.surface.blit(overlay, (0, 0))
+
     def _draw_particles(self) -> None:
         if not self._particles:
             return
@@ -600,11 +730,29 @@ class Renderer:
         _, _, scale = self._cam
         for p in self._particles:
             frac = p["age"] / p["life"]
-            if p["kind"] == "smoke":
+            kind = p["kind"]
+            if kind == "smoke":
                 radius_px = max(1, int((2.0 + 14.0 * frac) * scale))
                 color = (*SMOKE_COLOR, int(170 * (1.0 - frac) ** 1.5))
-            else:
-                # 부스러기는 커지지 않고 작게 유지되며 빠르게 흐려진다
+            elif kind == "dust":
+                radius_px = max(1, int((1.0 + 2.5 * frac) * scale))
+                color = (*DUST_COLOR, int(120 * (1.0 - frac)))
+            elif kind == "boom_smoke":
+                # 크게 부풀며 천천히 흐려지는 검은 버섯구름
+                radius_px = max(2, int((4.0 + 26.0 * frac) * scale))
+                color = (*BOOM_SMOKE_COLOR, int(200 * (1.0 - frac) ** 1.3))
+            elif kind == "boom_fire":
+                radius_px = max(1, int((3.0 + 8.0 * frac) * scale))
+                # 밝은 코어에서 주황으로 식는다
+                mix = frac
+                color = (int(BOOM_CORE_COLOR[0] + (BOOM_FIRE_COLOR[0] - BOOM_CORE_COLOR[0]) * mix),
+                         int(BOOM_CORE_COLOR[1] + (BOOM_FIRE_COLOR[1] - BOOM_CORE_COLOR[1]) * mix),
+                         int(BOOM_CORE_COLOR[2] + (BOOM_FIRE_COLOR[2] - BOOM_CORE_COLOR[2]) * mix),
+                         int(235 * (1.0 - frac)))
+            elif kind == "boom_debris":
+                radius_px = max(1, int(1.6 * scale))
+                color = (*DEBRIS_COLOR, int(245 * (1.0 - frac)))
+            else:   # debris
                 radius_px = max(1, int(1.2 * scale))
                 color = (*DEBRIS_COLOR, int(240 * (1.0 - frac)))
             pygame.draw.circle(overlay, color,
@@ -680,25 +828,35 @@ class Renderer:
     def _flame(self, state: State) -> None:
         """추력 단계에 따라 길이·굵기·색이 뚜렷이 달라지는 화염.
 
-        행동 테이블의 추력은 0 / 0.2G / 1.0G / 2.0G 네 단계다. 길이를 선형으로
-        잡으면 0.2G와 1.0G가 비슷해 보여 단계가 구분되지 않는다. 지수를
-        0.75로 눌러 낮은 단계도 짧게, 최대 단계는 확실히 길게 만든다.
+        추력은 0 / 0.6G / 1.0G / 1.6G / 2.5G 다섯 단계다. 길이를 선형으로
+        잡으면 인접 단계가 비슷해 보여 구분되지 않는다. 지수를 0.75로 눌러
+        낮은 단계도 짧게, 최대 단계는 확실히 길게 만든다.
+
+        화염이 지면(y=0) 아래로 뻗으면 지면에 맞춰 자른다 — 안 그러면
+        불길이 땅을 뚫고 내려가 보인다. 잘린 배기는 반사된 입자가 좌우로
+        퍼지며 이어받는다.
         """
         if state.thrust <= 0.0:
             return
-        ratio = state.thrust / (2.0 * G)
+        ratio = state.thrust / (2.5 * G)
         length = 5.0 + 40.0 * ratio ** 0.75
         half_w = 1.6 + 2.4 * ratio
         # 약한 분사는 노란빛, 강한 분사는 흰빛이 도는 주황
         color = ((255, 214, 92) if ratio < 0.3
                  else (255, 158, 66) if ratio < 0.7 else (255, 236, 190))
-        base = -ROCKET_HEIGHT / 2.0
-        tip = (length * math.sin(state.phi),
-               base - length * math.cos(state.phi))
+        base_by = -ROCKET_HEIGHT / 2.0
+        left = self._body_to_world(state, -half_w, base_by)
+        right = self._body_to_world(state, half_w, base_by)
+        tip = self._body_to_world(state, length * math.sin(state.phi),
+                                  base_by - length * math.cos(state.phi))
+        # 지면 클립: 화염 끝이 땅 아래로 가면 땅 높이에서 자른다.
+        base_mid_x = (left[0] + right[0]) / 2.0
+        base_mid_y = (left[1] + right[1]) / 2.0
+        if tip[1] < 0.0 < base_mid_y:
+            t = base_mid_y / (base_mid_y - tip[1])
+            tip = (base_mid_x + (tip[0] - base_mid_x) * t, 0.0)
         pygame.draw.polygon(self.surface, color, [
-            self._body_to_px(state, -half_w, base),
-            self._body_to_px(state, half_w, base),
-            self._body_to_px(state, tip[0], tip[1]),
+            self._to_px(*left), self._to_px(*right), self._to_px(*tip),
         ])
 
     def _hud(self, state: State) -> None:

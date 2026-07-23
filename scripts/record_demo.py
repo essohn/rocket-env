@@ -26,6 +26,7 @@ stdin으로 그대로 흘려보낸다. `subprocess`/`ffmpeg`/`stable_baselines3`
 """
 
 import argparse
+import math
 import os
 import subprocess
 from pathlib import Path
@@ -35,7 +36,12 @@ import numpy as np
 
 import rocket_env  # noqa: F401
 from rocket_env.config import PRESETS
-from rocket_env.render import GRIP_APPROACH_MAX
+from rocket_env.render import EXPLODE_SPEED, GRIP_APPROACH_MAX
+from rocket_env.types import Outcome
+
+# 빠른 충돌 폭발 연출 길이(프레임). fps=20 기준 약 2초에 걸쳐 화구·버섯
+# 구름이 피어올랐다 흩어진다.
+BOOM_FRAMES = 40
 
 EVAL_EPISODE_COUNT_DEFAULT = 20
 ARTIFACTS_DIR = Path(__file__).resolve().parent.parent / "artifacts"
@@ -94,13 +100,23 @@ def closing_frames(env, outcome: str, is_success: bool) -> list[np.ndarray]:
     그려야 해서 env.render()가 고정해 넘기는 grip(catch 논리)을 우회해야
     이 함수가 성립한다.
     """
-    if not is_success:
-        return []
     base = env.unwrapped
     state = base.state
     target = base.task.target(base.cfg)
     renderer = base._renderer
     is_catch = base.cfg["task"] == "catch"
+
+    # 빠른 충돌은 폭발한다. 성공이 아니어도 폭발 연출은 붙인다 — 화구·버섯
+    # 구름·파편이 피어올랐다 흩어지는 boom 0->1 시퀀스.
+    speed = math.hypot(state.vx, state.vy)
+    if (not is_success and outcome in (Outcome.CRASH, Outcome.MISSED,
+                                       Outcome.OUT_OF_FUEL)
+            and speed > EXPLODE_SPEED):
+        return [renderer.draw(state, target, outcome, boom=(i + 1) / BOOM_FRAMES)
+                for i in range(BOOM_FRAMES)]
+
+    if not is_success:
+        return []
 
     frames = []
     if is_catch:
