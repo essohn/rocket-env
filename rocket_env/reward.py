@@ -52,15 +52,20 @@ def _wrap_angle(theta: float) -> float:
 
 
 def _reach(value: float, threshold: float) -> float:
-    """임계값 안에서 1.0, 임계값의 2배 지점에서 0이 되는 선형 도달도.
+    """임계값 안에서 1.0, 그 밖에서는 부드럽게 지수 감쇠하는 도달도(0 바닥 없음).
 
-    _closeness(임계값에서 0.5)와 달리 **임계값에서 정확히 1.0**이다. 이는
-    실패↔성공 경계에서 보상이 연속이 되도록 하기 위한 것이다: 실패 보상이
-    경계에서 failure_max 에 도달하고, 성공 보상이 바로 그 값에서 시작하면
-    학생 정책이 넘을 수 없는 '점수 절벽'이 사라진다. 절벽이 있으면 탐험이
-    성공을 한 번도 밟지 못해 DQN 이 제동을 영영 배우지 못한다(실측 확인).
+    임계값에서 정확히 1.0이라 실패↔성공 경계가 연속이다. 임계값을 넘으면
+    선형으로 끊지 않고 exp(-(초과분)/임계값)으로 **전 구간 단조 감소**한다.
+
+    예전엔 임계값 2배 지점(예: v_max 15의 2배인 30 m/s)에서 0으로 끊겨, 그
+    너머 모든 크래시가 똑같이 0점이었다 — 60 m/s 든 250 m/s 든 구분이 없어
+    "더 느리게 부딪히면 낫다"는 gradient 가 사라졌다. 이 평평한 0 바닥이
+    제동 학습을 막는 원인이었다(실측: gradual 화만으로 접지속도 76→49 m/s).
+    이제 접지가 느릴수록·중심에 가까울수록·수직일수록 항상 점수가 높다.
     """
-    return min(max(1.0 - max(0.0, value - threshold) / threshold, 0.0), 1.0)
+    if value <= threshold:
+        return 1.0
+    return math.exp(-(value - threshold) / threshold)
 
 
 def potential(state: State, target: tuple[float, float], cfg: dict) -> float:
@@ -82,17 +87,19 @@ def shaping(prev_potential: float, cur_potential: float, cfg: dict) -> float:
 
 def terminal_reward(outcome: str, state: State, target: tuple[float, float],
                     cfg: dict, fuel_frac: float) -> float:
-    """종료 시 한 번 지급되는 보상.
+    """종료 시 한 번 지급되는 보상. 전 구간에서 gradual(연속·단조)하게 설계한다.
 
-    실패와 성공이 경계에서 연속이 되도록 설계한다:
-      - 실패(접촉): failure_max × min(4개 축 도달도). 각 축이 임계값에
-        가까울수록 커지고, 모든 축이 임계값 안이면 failure_max 에 이른다.
-      - 성공: 그 failure_max 를 바닥으로 삼아, 접지 속도가 낮을수록(가장
-        중요한 축) 그리고 중심 정렬·연료 잔량이 좋을수록 위로 쌓는다.
-    경계에서 실패는 failure_max, 성공은 failure_max + (거의 0인 보너스)라
-    점프가 없다. 예전의 실패~40 → 성공~200 절벽이 탐험을 막아 DQN 이 제동을
-    배우지 못하던 문제(0% 학습)를 이 연속화가 해결한다(실측: 초쉬움 라운드
-    0% → 100%).
+      - 실패(접촉): closeness × (failure_max + 위치 + 연료). closeness 는
+        5개 축 도달도의 min 이며, 각 도달도가 임계값 밖에서 0으로 끊기지 않고
+        지수 감쇠한다([[_reach]]). 그래서 60 m/s 크래시가 250 m/s 크래시보다
+        확실히 높은 점수를 받아 "더 느리게 부딪히면 낫다"는 gradient 가 살아
+        있다 — 제동 학습의 핵심.
+      - 성공: 같은 바닥(failure_max + 위치 + 연료)에서 시작해, 접지 속도가
+        낮을수록(success_soft·가장 중요한 축) 위로 더 쌓는다.
+    경계(모든 축이 임계값)에서 실패=failure_max+위치+연료, 성공=거기에 거의
+    0인 속도 보너스만 더해져 점프가 없다. 예전엔 (1) 실패가 임계값 2배 밖에서
+    일괄 0점이라 제동 gradient 가 없었고 (2) 경계에서 실패40→성공80 점프가
+    있었다 — 둘 다 이 설계로 사라진다.
     """
     r = cfg["reward"]
     s = cfg["success"]
@@ -117,9 +124,9 @@ def terminal_reward(outcome: str, state: State, target: tuple[float, float],
 
     if outcome in _CONTACT_FAILURES:
         # 성공은 네 조건을 모두 만족해야 하므로, 실패 점수도 가장 약한
-        # 고리가 정한다 — 평균을 쓰면 "속도만 빼고 완벽"이 높은 점수를
-        # 받아, 중력이 공짜로 만들어 주는 자유낙하 고득점이 되살아난다.
-        return r["failure_max"] * min(
+        # 고리(closeness)가 정한다 — 평균을 쓰면 "속도만 빼고 완벽"이 높은
+        # 점수를 받아, 중력이 공짜로 만들어 주는 자유낙하 고득점이 되살아난다.
+        closeness = min(
             _reach(dx, s["zone_r"]),
             _reach(abs(state.y - target[1]), s["zone_r"]),
             _reach(speed, s["v_max"]),
@@ -127,5 +134,13 @@ def terminal_reward(outcome: str, state: State, target: tuple[float, float],
                    math.radians(s["theta_max_deg"])),
             _reach(abs(state.omega), math.radians(s["omega_max_deg"])),
         )
+        # 성공과 경계에서 연속이 되도록 위치·연료 보너스도 함께 준다. closeness
+        # (speed 도달도 포함)로 스케일하므로 빠른 크래시는 전체가 작아져
+        # 자유낙하 고득점 악용은 여전히 막힌다. 경계(closeness=1)에서
+        # failure_max + 위치 + 연료 = 성공식의 바닥과 일치한다.
+        centered = max(0.0, 1.0 - dx / s["zone_r"])
+        return closeness * (r["failure_max"]
+                            + r["success_position"] * centered
+                            + r["success_fuel"] * fuel_frac)
 
     raise ValueError(f"종료 보상을 계산할 수 없는 outcome: {outcome!r}")

@@ -82,16 +82,18 @@ def test_marginal_success_still_beats_every_failure():
     assert marginal > best_failure
 
 
-def test_freefall_impact_scores_zero():
-    """자유낙하로 지면에 꽂히면 0점이다.
+def test_freefall_impact_scores_low():
+    """자유낙하로 지면에 꽂히면 아주 낮은 점수를 받는다(무행동 악용 방지).
 
-    예전에는 목표까지의 직선 거리로 채점해서, 목표가 지면에 있는 탓에
-    중력이 거리를 공짜로 닫아 주었다. 아무것도 안 하는 정책이 실패 점수의
-    80~89%를 받았고, 학습된 DQN 이 무행동보다 낮은 점수를 받았다.
+    도달도가 전 구간 gradual 이라 종단속도 충돌도 정확히 0은 아니지만, 제어된
+    접지보다 훨씬 낮다. 핵심은 '더 느리게 부딪힐수록' 항상 점수가 높아 제동을
+    배울 gradient 가 살아 있다는 것 — 예전의 일괄 0점 바닥은 이 신호를 죽였다.
     """
-    impact = at(x=0.0, y=25.0, vy=-49.5)     # 종단속도로 접지
-    r = terminal_reward(Outcome.CRASH, impact, TARGET, CFG, fuel_frac=0.5)
-    assert r == pytest.approx(0.0)
+    freefall = terminal_reward(Outcome.CRASH, at(x=0.0, y=25.0, vy=-49.5),
+                               TARGET, CFG, fuel_frac=0.5)
+    controlled = terminal_reward(Outcome.CRASH, at(x=0.0, y=25.0, vy=-16.0),
+                                 TARGET, CFG, fuel_frac=0.5)
+    assert 0.0 < freefall < 0.15 * controlled
 
 
 def test_high_hover_timeout_scores_zero():
@@ -111,18 +113,20 @@ def test_success_attitude_bonus_is_the_same_for_theta_zero_and_two_pi():
     assert spun == pytest.approx(upright)
 
 
-def test_at_threshold_failure_reaches_the_full_maximum():
-    """모든 축이 정확히 임계값 위에서 실패하면 failure_max 전부를 받는다.
+def test_at_threshold_failure_equals_the_success_floor():
+    """모든 축이 정확히 임계값에서 실패하면 성공식의 '바닥'과 같은 값을 받는다.
 
-    _reach 가 임계값에서 1.0이기 때문이다. 이것이 성공↔실패 경계를 연속으로
-    만든다: 실패는 경계에서 failure_max, 성공은 그 값에서 시작하므로 예전의
-    실패~20 → 성공~200 점프(절벽)가 사라진다. 이 절벽이 있으면 탐험이 성공을
-    한 번도 밟지 못해 DQN 이 제동을 배우지 못했다.
+    _reach 가 임계값에서 1.0이라 closeness=1, 실패 = failure_max + 위치 + 연료.
+    성공도 그 값에서 (거의 0인 속도 보너스만 더해) 시작하므로 경계가 연속이다.
+    예전의 실패~40 → 성공~80 점프(절벽)가 사라진다.
     """
     s = CFG["success"]
+    r_ = CFG["reward"]
     near = at(x=0.0, y=25.0, vy=-s["v_max"])   # 속도만 임계값, 나머지는 목표에서 완벽
     r = terminal_reward(Outcome.CRASH, near, TARGET, CFG, fuel_frac=0.5)
-    assert r == pytest.approx(CFG["reward"]["failure_max"])
+    assert r == pytest.approx(r_["failure_max"]
+                              + r_["success_position"]
+                              + r_["success_fuel"] * 0.5)
 
 
 def test_failure_to_success_boundary_is_continuous():
@@ -148,11 +152,16 @@ def test_weakest_criterion_determines_the_failure_score():
     평균을 쓰면 '속도만 빼고 완벽'이 높은 점수를 받아 자유낙하가 되살아난다.
     """
     s = CFG["success"]
+    r_ = CFG["reward"]
     good = at(x=0.0, y=25.0, vy=-1.0)
-    bad_speed = at(x=0.0, y=25.0, vy=-2.0 * s["v_max"])
-    assert terminal_reward(Outcome.CRASH, good, TARGET, CFG, fuel_frac=0.0) > 0.0
-    assert terminal_reward(Outcome.CRASH, bad_speed, TARGET, CFG,
-                           fuel_frac=0.0) == pytest.approx(0.0)
+    bad_speed = at(x=0.0, y=25.0, vy=-2.0 * s["v_max"])   # 속도만 임계값 2배
+    good_score = terminal_reward(Outcome.CRASH, good, TARGET, CFG, fuel_frac=0.0)
+    bad_score = terminal_reward(Outcome.CRASH, bad_speed, TARGET, CFG, fuel_frac=0.0)
+    # 위치·자세가 완벽해도 속도(가장 약한 고리) 하나가 전체를 끌어내린다.
+    assert 0.0 < bad_score < good_score
+    # 그 값은 정확히 속도 도달도로 스케일된다(min = 가장 약한 고리).
+    assert bad_score == pytest.approx(
+        math.exp(-1.0) * (r_["failure_max"] + r_["success_position"]))
 
 
 def test_potential_penalises_speed():
@@ -174,12 +183,13 @@ def test_failure_reward_has_no_time_term():
     """같은 상태라면 언제 끝났든 실패 점수는 동일하다.
 
     원본 환경은 실패 보상에 (max_steps - step)을 곱해서 조기 자폭이
-    고득점이 되었다. 이 테스트가 그 회귀를 막는다.
+    고득점이 되었다. 이 테스트가 그 회귀를 막는다. (연료는 점수 축이므로
+    같게 두고, step 만 다르게 해서 시간 의존이 없음을 확인한다.)
     """
     early = terminal_reward(Outcome.CRASH, at(x=10.0, y=100.0, step=5),
-                            TARGET, CFG, fuel_frac=0.9)
+                            TARGET, CFG, fuel_frac=0.5)
     late = terminal_reward(Outcome.CRASH, at(x=10.0, y=100.0, step=790),
-                           TARGET, CFG, fuel_frac=0.1)
+                           TARGET, CFG, fuel_frac=0.5)
     assert early == pytest.approx(late)
 
 
@@ -189,7 +199,9 @@ def test_contact_failures_share_the_same_formula():
     scores = [terminal_reward(o, state, TARGET, CFG, fuel_frac=0.5)
               for o in (Outcome.CRASH, Outcome.MISSED, Outcome.OUT_OF_FUEL)]
     assert len(set(scores)) == 1
-    assert 0.0 <= scores[0] <= CFG["reward"]["failure_max"]
+    r_ = CFG["reward"]
+    ceiling = r_["failure_max"] + r_["success_position"] + r_["success_fuel"]
+    assert 0.0 <= scores[0] <= ceiling
 
 
 def test_timeout_scores_zero_even_in_a_near_perfect_state():
