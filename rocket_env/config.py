@@ -59,14 +59,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "catch": {"x_tower": 0.0, "y_arm": 120.0},
 
     "reward": {
-        "success_base": 100.0,
-        "w_speed": 40.0,
-        "v_ref": 5.0,
-        "w_position": 30.0,
-        "w_attitude": 20.0,
-        "w_fuel": 30.0,
-        "w_time": 30.0,
+        # 종료 보상. 실패↔성공이 경계에서 연속이 되도록 설계했다(reward.py
+        # 참조). failure_max 는 실패 상한이자 성공의 바닥이다 — 학생이 요청한
+        # "실패 구간 0~40"을 지키면서 절벽을 없앤다.
         "failure_max": 40.0,
+        # 성공 보너스: 접지 속도가 낮을수록 크다. soft_v_ref 가 작을수록
+        # 아주 느린 착지에만 큰 점수를 몰아준다.
+        "success_soft": 140.0,
+        "soft_v_ref": 3.0,
+        "success_position": 20.0,
+        "success_fuel": 20.0,
         # 1.0이어야 shaping 총합이 정확히 Φ(s_T) - Φ(s_0)로 접힌다.
         # γ<1이면 에피소드가 길수록 shaping 총합이 커지는 편향이 생긴다.
         "shaping_gamma": 1.0,
@@ -98,10 +100,10 @@ CATCH_OVERRIDES: dict[str, Any] = {
         "zone_r": 15.0,
     },
     "reward": {
-        "w_speed": 60.0,
-        "v_ref": 2.0,
-        "w_fuel": 20.0,
-        "w_time": 20.0,
+        # 캐치는 접촉 속도가 핵심 지표다. 속도 보너스를 키우고(140→200)
+        # 참조 속도를 더 조여(3→1.5) 아주 느린 포획에만 큰 점수를 몰아준다.
+        "success_soft": 200.0,
+        "soft_v_ref": 1.5,
     },
 }
 
@@ -310,11 +312,11 @@ def _validate_ranges(cfg: dict) -> None:
         if value <= 0:
             raise ConfigError(f"success.{key}는 양수여야 합니다: {value}")
 
-    # v_ref 는 exp(-speed / v_ref) 의 분모다. 0이면 ZeroDivisionError,
-    # 음수면 속도가 빠를수록 점수가 오르도록 부호가 뒤집힌다.
-    if cfg["reward"]["v_ref"] <= 0:
+    # soft_v_ref 는 exp(-speed / soft_v_ref) 의 분모다. 0이면
+    # ZeroDivisionError, 음수면 속도가 빠를수록 점수가 오르도록 부호가 뒤집힌다.
+    if cfg["reward"]["soft_v_ref"] <= 0:
         raise ConfigError(
-            f"reward.v_ref는 양수여야 합니다: {cfg['reward']['v_ref']}"
+            f"reward.soft_v_ref는 양수여야 합니다: {cfg['reward']['soft_v_ref']}"
         )
 
     ground = ROCKET_HEIGHT / 2.0

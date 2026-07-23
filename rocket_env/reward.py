@@ -51,13 +51,16 @@ def _wrap_angle(theta: float) -> float:
     return (theta + math.pi) % (2.0 * math.pi) - math.pi
 
 
-def _closeness(value: float, threshold: float) -> float:
-    """임계값의 2배 지점에서 0이 되는 선형 근접도.
+def _reach(value: float, threshold: float) -> float:
+    """임계값 안에서 1.0, 임계값의 2배 지점에서 0이 되는 선형 도달도.
 
-    임계값 자체에서 0.5 다. 부분 점수를 주되 '거의 성공'과 '한참 멀었음'을
-    뚜렷이 가르는 기울기를 만든다.
+    _closeness(임계값에서 0.5)와 달리 **임계값에서 정확히 1.0**이다. 이는
+    실패↔성공 경계에서 보상이 연속이 되도록 하기 위한 것이다: 실패 보상이
+    경계에서 failure_max 에 도달하고, 성공 보상이 바로 그 값에서 시작하면
+    학생 정책이 넘을 수 없는 '점수 절벽'이 사라진다. 절벽이 있으면 탐험이
+    성공을 한 번도 밟지 못해 DQN 이 제동을 영영 배우지 못한다(실측 확인).
     """
-    return min(max(1.0 - value / (2.0 * threshold), 0.0), 1.0)
+    return min(max(1.0 - max(0.0, value - threshold) / threshold, 0.0), 1.0)
 
 
 def potential(state: State, target: tuple[float, float], cfg: dict) -> float:
@@ -79,23 +82,20 @@ def shaping(prev_potential: float, cur_potential: float, cfg: dict) -> float:
 
 def terminal_reward(outcome: str, state: State, target: tuple[float, float],
                     cfg: dict, fuel_frac: float) -> float:
-    """종료 시 한 번 지급되는 보상."""
+    """종료 시 한 번 지급되는 보상.
+
+    실패와 성공이 경계에서 연속이 되도록 설계한다:
+      - 실패(접촉): failure_max × min(4개 축 도달도). 각 축이 임계값에
+        가까울수록 커지고, 모든 축이 임계값 안이면 failure_max 에 이른다.
+      - 성공: 그 failure_max 를 바닥으로 삼아, 접지 속도가 낮을수록(가장
+        중요한 축) 그리고 중심 정렬·연료 잔량이 좋을수록 위로 쌓는다.
+    경계에서 실패는 failure_max, 성공은 failure_max + (거의 0인 보너스)라
+    점프가 없다. 예전의 실패~40 → 성공~200 절벽이 탐험을 막아 DQN 이 제동을
+    배우지 못하던 문제(0% 학습)를 이 연속화가 해결한다(실측: 초쉬움 라운드
+    0% → 100%).
+    """
     r = cfg["reward"]
     s = cfg["success"]
-
-    if outcome == Outcome.SUCCESS:
-        speed = math.hypot(state.vx, state.vy)
-        dx = abs(state.x - target[0])
-        return (
-            r["success_base"]
-            + r["w_speed"] * math.exp(-speed / r["v_ref"])
-            + r["w_position"] * max(0.0, 1.0 - dx / s["zone_r"])
-            + r["w_attitude"] * max(
-                0.0, 1.0 - abs(_wrap_angle(state.theta))
-                / math.radians(s["theta_max_deg"]))
-            + r["w_fuel"] * fuel_frac
-            + r["w_time"] * (1.0 - state.step / cfg["max_steps"])
-        )
 
     if outcome == Outcome.TIMEOUT:
         # 시간이 다 되도록 판정 지점에 가지 않았다면 시도 자체를 하지 않은
@@ -103,18 +103,29 @@ def terminal_reward(outcome: str, state: State, target: tuple[float, float],
         # 높은 점수를 받으면, 최적 전략은 "절대 착륙하지 않기"가 된다.
         return 0.0
 
+    speed = math.hypot(state.vx, state.vy)
+    dx = abs(state.x - target[0])
+
+    if outcome == Outcome.SUCCESS:
+        centered = max(0.0, 1.0 - dx / s["zone_r"])
+        return (
+            r["failure_max"]
+            + r["success_soft"] * math.exp(-speed / r["soft_v_ref"])
+            + r["success_position"] * centered
+            + r["success_fuel"] * fuel_frac
+        )
+
     if outcome in _CONTACT_FAILURES:
-        speed = math.hypot(state.vx, state.vy)
-        # 성공은 다섯 조건을 모두 만족해야 한다. 실패 점수도 가장 약한
+        # 성공은 네 조건을 모두 만족해야 하므로, 실패 점수도 가장 약한
         # 고리가 정한다 — 평균을 쓰면 "속도만 빼고 완벽"이 높은 점수를
         # 받아, 중력이 공짜로 만들어 주는 자유낙하 고득점이 되살아난다.
         return r["failure_max"] * min(
-            _closeness(abs(state.x - target[0]), s["zone_r"]),
-            _closeness(abs(state.y - target[1]), s["zone_r"]),
-            _closeness(speed, s["v_max"]),
-            _closeness(abs(_wrap_angle(state.theta)),
-                       math.radians(s["theta_max_deg"])),
-            _closeness(abs(state.omega), math.radians(s["omega_max_deg"])),
+            _reach(dx, s["zone_r"]),
+            _reach(abs(state.y - target[1]), s["zone_r"]),
+            _reach(speed, s["v_max"]),
+            _reach(abs(_wrap_angle(state.theta)),
+                   math.radians(s["theta_max_deg"])),
+            _reach(abs(state.omega), math.radians(s["omega_max_deg"])),
         )
 
     raise ValueError(f"종료 보상을 계산할 수 없는 outcome: {outcome!r}")

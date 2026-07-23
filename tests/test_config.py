@@ -24,23 +24,23 @@ def test_build_config_does_not_mutate_defaults():
 
 
 def test_partial_nested_override_keeps_sibling_defaults():
-    cfg = build_config({"reward": {"success_base": 200.0}})
-    assert cfg["reward"]["success_base"] == 200.0
-    assert cfg["reward"]["w_speed"] == 40.0
+    cfg = build_config({"reward": {"success_soft": 200.0}})
+    assert cfg["reward"]["success_soft"] == 200.0
+    assert cfg["reward"]["soft_v_ref"] == 3.0
 
 
 def test_catch_task_swaps_in_catch_profile():
     cfg = build_config({"task": "catch"})
     assert cfg["success"]["v_max"] == 8.0
     assert cfg["success"]["zone_r"] == 15.0
-    assert cfg["reward"]["w_speed"] == 60.0
-    assert cfg["reward"]["v_ref"] == 2.0
+    assert cfg["reward"]["success_soft"] == 200.0
+    assert cfg["reward"]["soft_v_ref"] == 1.5
 
 
 def test_explicit_user_value_beats_catch_profile():
-    cfg = build_config({"task": "catch", "reward": {"w_speed": 5.0}})
-    assert cfg["reward"]["w_speed"] == 5.0
-    assert cfg["reward"]["v_ref"] == 2.0
+    cfg = build_config({"task": "catch", "reward": {"success_soft": 5.0}})
+    assert cfg["reward"]["success_soft"] == 5.0
+    assert cfg["reward"]["soft_v_ref"] == 1.5
 
 
 def test_locked_key_raises_config_error():
@@ -70,9 +70,9 @@ def test_negative_fuel_capacity_raises_config_error():
         build_config({"fuel": {"capacity": -1.0}})
 
 
-def test_non_positive_v_ref_raises_config_error():
-    with pytest.raises(ConfigError, match="v_ref"):
-        build_config({"reward": {"v_ref": 0.0}})
+def test_non_positive_soft_v_ref_raises_config_error():
+    with pytest.raises(ConfigError, match="soft_v_ref"):
+        build_config({"reward": {"soft_v_ref": 0.0}})
 
 
 def test_none_fuel_capacity_is_allowed():
@@ -116,7 +116,7 @@ def test_unknown_nested_key_raises_config_error():
     ("landing-gust", ("wind", "ou_sigma"), 3.0),
     ("landing-gust", ("fuel", "capacity"), 70.0),
     ("catch", ("success", "zone_r"), 15.0),
-    ("catch", ("reward", "w_speed"), 60.0),
+    ("catch", ("reward", "success_soft"), 200.0),
     ("catch", ("fuel", "capacity"), 80.0),
 ])
 def test_preset_literal_values(name, path, expected):
@@ -134,7 +134,7 @@ def test_preset_literal_values(name, path, expected):
 def test_reward_change_is_free_and_produces_no_warning():
     eval_cfg = build_config(PRESETS["landing-descent"])
     train_cfg = build_config({**PRESETS["landing-descent"],
-                              "reward": {"success_base": 999.0}})
+                              "reward": {"success_soft": 999.0}})
     ok, warnings, errors = validate_train_config(train_cfg, eval_cfg)
     assert ok
     assert errors == []

@@ -61,9 +61,10 @@ def test_shaping_total_is_independent_of_episode_length():
 
 
 def test_perfect_landing_scores_near_the_maximum():
+    # failure_max(40) + success_soft(140) + success_position(20) + success_fuel(20)
     r = terminal_reward(Outcome.SUCCESS, at(x=0.0, y=25.0, step=0),
                         TARGET, CFG, fuel_frac=1.0)
-    assert r == pytest.approx(250.0, abs=0.5)
+    assert r == pytest.approx(220.0, abs=0.5)
 
 
 def test_marginal_success_still_beats_every_failure():
@@ -109,12 +110,34 @@ def test_success_attitude_bonus_is_the_same_for_theta_zero_and_two_pi():
     assert spun == pytest.approx(upright)
 
 
-def test_near_miss_scores_half_the_failure_maximum():
-    """임계값 정확히 위에서 실패하면 절반을 받는다."""
+def test_at_threshold_failure_reaches_the_full_maximum():
+    """모든 축이 정확히 임계값 위에서 실패하면 failure_max 전부를 받는다.
+
+    _reach 가 임계값에서 1.0이기 때문이다. 이것이 성공↔실패 경계를 연속으로
+    만든다: 실패는 경계에서 failure_max, 성공은 그 값에서 시작하므로 예전의
+    실패~20 → 성공~200 점프(절벽)가 사라진다. 이 절벽이 있으면 탐험이 성공을
+    한 번도 밟지 못해 DQN 이 제동을 배우지 못했다.
+    """
     s = CFG["success"]
-    near = at(x=0.0, y=25.0, vy=-s["v_max"])
+    near = at(x=0.0, y=25.0, vy=-s["v_max"])   # 속도만 임계값, 나머지는 목표에서 완벽
     r = terminal_reward(Outcome.CRASH, near, TARGET, CFG, fuel_frac=0.5)
-    assert r == pytest.approx(CFG["reward"]["failure_max"] * 0.5)
+    assert r == pytest.approx(CFG["reward"]["failure_max"])
+
+
+def test_failure_to_success_boundary_is_continuous():
+    """경계를 사이에 둔 실패와 성공의 점수 차가 크지 않다(절벽 없음)."""
+    s = CFG["success"]
+    # 속도가 임계값을 아주 살짝 넘은 실패 vs 아주 살짝 못 넘은 성공
+    fail = terminal_reward(Outcome.CRASH,
+                           at(x=0.0, y=25.0, vy=-(s["v_max"] + 0.01)),
+                           TARGET, CFG, fuel_frac=0.0)
+    succ = terminal_reward(Outcome.SUCCESS,
+                           at(x=0.0, y=25.0, vy=-(s["v_max"] - 0.01)),
+                           TARGET, CFG, fuel_frac=0.0)
+    # 성공에는 중심 정렬 보너스(dx=0)가 붙지만, 점프는 예전 절벽(약 180)의
+    # 몇 분의 일 수준이어야 한다.
+    assert succ >= fail
+    assert succ - fail < 40.0
 
 
 def test_weakest_criterion_determines_the_failure_score():
