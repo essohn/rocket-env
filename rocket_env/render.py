@@ -192,6 +192,8 @@ class Renderer:
         self.render_mode = render_mode
         self.font = pygame.font.SysFont("monospace", 15)
         self.banner_font = pygame.font.SysFont("monospace", 34, bold=True)
+        self.score_font = pygame.font.SysFont("monospace", 64, bold=True)
+        self.score_label_font = pygame.font.SysFont("monospace", 14, bold=True)
         # 궤적은 월드 좌표로 쌓는다. 픽셀로 저장하면 카메라가 움직여도 선이
         # 화면 좌표에 붙박여 공중이 아니라 뷰포트에 고정된 것처럼 보인다.
         self.trail: list[tuple[float, float]] = []
@@ -234,7 +236,8 @@ class Renderer:
     def draw(self, state: State, target: tuple[float, float],
              outcome: str, grip: float | None = None, settle: float = 0.0,
              boom: float = 0.0, hold_camera: bool = False,
-             action_info=None, retry_hint: bool = False):
+             action_info=None, retry_hint: bool = False,
+             score: float | None = None):
         """한 프레임을 그린다.
 
         `action_info`(선택)는 우측 상단 행동 시각화에 쓴다. 정수(선택된 행동
@@ -309,8 +312,10 @@ class Renderer:
 
         if outcome != Outcome.IN_PROGRESS:
             self._banner(outcome)
+        if score is not None:
+            self._score_display(score)
         if retry_hint:
-            self._retry_hint()
+            self._retry_hint(offset=120 if score is not None else 40)
 
         if self.render_mode == "human":
             pygame.event.pump()
@@ -1266,14 +1271,23 @@ class Renderer:
         rect = surface.get_rect(center=(WIDTH // 2, HEIGHT // 3))
         self.surface.blit(surface, rect)
 
-    def _retry_hint(self) -> None:
-        """수동 모드에서 에피소드가 끝났을 때 재시작 안내. 배너 아래에 그린다."""
-        surface = self.font.render("Press R to retry", True, (240, 240, 250))
+    def _score_display(self, score: float) -> None:
+        """에피소드 종료 시 큰 글씨로 점수를 보여준다. 배너 바로 아래 중앙."""
+        cx = WIDTH // 2
+        label = self.score_label_font.render("SCORE", True, (174, 180, 198))
+        self.surface.blit(label, label.get_rect(center=(cx, HEIGHT // 3 + 34)))
+        num = self.score_font.render(f"{score:.0f}", True, (255, 255, 255))
+        self.surface.blit(num, num.get_rect(center=(cx, HEIGHT // 3 + 74)))
+
+    def _retry_hint(self, offset: int = 40) -> None:
+        """수동 모드에서 에피소드가 끝났을 때 재시작·영상 저장 안내."""
+        surface = self.font.render("R to retry  ·  V to save video",
+                                   True, (240, 240, 250))
         # 어두운 판을 깔아 배경과 대비시킨다.
         pad = 8
         panel = pygame.Surface((surface.get_width() + pad * 2,
                                 surface.get_height() + pad), pygame.SRCALPHA)
         panel.fill((10, 12, 24, 150))
-        cx, cy = WIDTH // 2, HEIGHT // 3 + 40
+        cx, cy = WIDTH // 2, HEIGHT // 3 + offset
         self.surface.blit(panel, panel.get_rect(center=(cx, cy)))
         self.surface.blit(surface, surface.get_rect(center=(cx, cy)))

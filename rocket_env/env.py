@@ -59,6 +59,7 @@ class RocketEnv(gym.Env):
         self._initial_potential = 0.0
         self._outcome = Outcome.IN_PROGRESS
         self._last_action = None
+        self._score = None            # 종료 시 지급되는 착륙 점수(연속 종단보상)
 
     # --- Gymnasium API ---
 
@@ -77,6 +78,7 @@ class RocketEnv(gym.Env):
         self._initial_potential = self._potential
         self._outcome = Outcome.IN_PROGRESS
         self._last_action = None
+        self._score = None
 
         if self._renderer is not None:
             self._renderer.reset()
@@ -126,8 +128,10 @@ class RocketEnv(gym.Env):
         if outcome is not None:
             self._outcome = outcome
             reward += self._initial_potential
-            reward += terminal_reward(outcome, cur, self._target, self.cfg,
-                                      self._fuel_frac())
+            term_r = terminal_reward(outcome, cur, self._target, self.cfg,
+                                     self._fuel_frac())
+            reward += term_r
+            self._score = term_r      # 착륙 점수 = 종단보상(수동 모드 표시·채점용)
             if outcome != Outcome.TIMEOUT:
                 impact_speed = math.hypot(cur.vx, cur.vy)
 
@@ -180,6 +184,7 @@ class RocketEnv(gym.Env):
         return {
             "is_success": self._outcome == Outcome.SUCCESS,
             "outcome": self._outcome,
+            "score": self._score,
             "fuel_left": self.state.fuel,
             "fuel_frac": self._fuel_frac(),
             "impact_speed": impact_speed,

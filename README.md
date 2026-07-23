@@ -126,7 +126,8 @@ Colab은 화면이 없으므로 첫 `pygame` import 전에 `os.environ["SDL_VIDE
 **웹(설치 불필요)** — [`web/play.html`](web/play.html). 파이썬 물리를 그대로
 포팅한 단일 HTML 파일이라 브라우저로 바로 열린다. Colab처럼 화면 없는 환경에서
 쓰던 학생도 링크만으로 조종해 볼 수 있다. `↑/↓` 추력, `←/→` 노즐, `R` 재시작,
-`1`–`4` 라운드.
+`V` 방금 에피소드 영상 저장(webm), `1`–`4` 라운드. 에피소드가 끝나면 큰 글씨로
+착륙 점수(0~220, 접지가 느릴수록 높다)가 뜬다.
 
 **파이썬(로컬, pygame 창)** —
 
@@ -134,7 +135,9 @@ Colab은 화면이 없으므로 첫 `pygame` import 전에 `os.environ["SDL_VIDE
 uv run python scripts/play.py --preset landing-basic --livery 내별명
 ```
 
-`↑/↓`(추력 단계), `←/→`(노즐), `R`(재시작), `Esc`(종료).
+`↑/↓`(추력 단계), `←/→`(노즐), `R`(재시작), `V`(방금 에피소드 영상 저장 —
+`pip install imageio imageio-ffmpeg` 필요), `Esc`(종료). 종료 시 큰 글씨로
+착륙 점수가 뜬다.
 
 ## 로켓 도색 (별명)
 

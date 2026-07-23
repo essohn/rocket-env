@@ -67,6 +67,7 @@
   <span class="key"><kbd>↑</kbd><kbd>↓</kbd> 추력 단계</span>
   <span class="key"><kbd>←</kbd><kbd>→</kbd> 노즐 짐벌</span>
   <span class="key"><kbd>R</kbd> 재시작</span>
+  <span class="key"><kbd>V</kbd> 영상 저장</span>
   <span class="key"><kbd>1</kbd>–<kbd>4</kbd> 라운드</span>
 </footer>
 <p class="note">파이썬 환경(rocket-env)의 물리를 그대로 포팅했다 — 여기서 익힌 감각이 학습 환경과 같다.</p>
@@ -85,11 +86,12 @@ const NOZ=[-120*Math.PI/180, 0, 120*Math.PI/180];   // 노즐 각속도 3단
 const MAX_STEPS=800, GROUND=H/2;                     // 접지 시 중심 y
 
 // ── 라운드 (config.py PRESETS 요약) ─────────────────────────────
+// sref/ssoft: 착륙 점수의 데미지 민감도·성공 보너스(config.py 와 일치)
 const ROUNDS={
-  "landing-basic":   {y:250, vy:-20, x:30,  th:5,  om:[6,10],  wind:0,   fuel:null, vmax:15, zone:50, gust:false},
-  "landing-attitude":{y:300, vy:-28, x:30,  th:20, om:[6,10],  wind:0,   fuel:null, vmax:12, zone:50, gust:false},
-  "landing-descent": {y:550, vy:-40, x:60,  th:20, om:[8,12],  wind:0,   fuel:null, vmax:10, zone:50, gust:false},
-  "landing-gust":    {y:800, vy:-45, x:90,  th:30, om:[10,14], wind:12,  fuel:70,   vmax:8,  zone:50, gust:true},
+  "landing-basic":   {y:250, vy:-20, x:30,  th:5,  om:[6,10],  wind:0,   fuel:null, vmax:15, zone:50, gust:false, sref:3.0, ssoft:140},
+  "landing-attitude":{y:300, vy:-28, x:30,  th:20, om:[6,10],  wind:0,   fuel:null, vmax:12, zone:50, gust:false, sref:2.5, ssoft:150},
+  "landing-descent": {y:550, vy:-40, x:60,  th:20, om:[8,12],  wind:0,   fuel:null, vmax:10, zone:50, gust:false, sref:2.0, ssoft:160},
+  "landing-gust":    {y:800, vy:-45, x:90,  th:30, om:[10,14], wind:12,  fuel:70,   vmax:8,  zone:50, gust:true,  sref:1.5, ssoft:180},
 };
 const LABEL={"landing-basic":"1 · basic","landing-attitude":"2 · attitude",
   "landing-descent":"3 · descent","landing-gust":"4 · gust"};
@@ -111,7 +113,10 @@ function skyColor(y){
 const cvs=document.getElementById("c"), ctx=cvs.getContext("2d");
 const W=cvs.width, Hh=cvs.height;
 let S, cam, particles, thrust, outcome, boom, boomI, frames, roundKey, rng;
+let score=null;                              // 종료 시 착륙 점수
 let held={left:false,right:false};
+// 영상 녹화(MediaRecorder). 에피소드마다 새로 녹화하고, 종료 후 V 로 저장.
+let recStream=null, recorder=null, recChunks=[], lastVideoBlob=null, recStopIn=0;
 
 function rand(a,b){return a+Math.random()*(b-a);}
 function reset(){
@@ -121,8 +126,48 @@ function reset(){
      theta:rand(-r.th,r.th)*Math.PI/180, omega:osgn*rand(r.om[0],r.om[1])*Math.PI/180,
      phi:0, fuel:r.fuel, wind:r.wind?(r.gust?0:r.wind):0, step:0};
   cam=null; particles=[]; thrust=0; outcome=null; boom=0; boomI=1; frames=0;
+  score=null; recStopIn=0; startRec();
   document.getElementById("phys").textContent=
     `${LABEL[roundKey]} · 접지 <${r.vmax} m/s · 존 ±${r.zone} m`;
+}
+
+// ── 착륙 점수 (reward.py terminal_reward 와 동일 척도, 0~220) ────
+function landingScore(){
+  const r=ROUNDS[roundKey], spd=Math.hypot(S.vx,S.vy), tilt=Math.abs(wrap(S.theta)),
+    om=Math.abs(S.omega), dx=Math.abs(S.x), dy=Math.abs(S.y-GROUND);
+  const ff=r.fuel===null?1:Math.max(0,Math.min(1,S.fuel/r.fuel));
+  if(outcome==="LANDED"){
+    const centered=Math.max(0,1-dx/r.zone);
+    return 40 + r.ssoft*Math.exp(-spd/r.sref) + 20*centered + 20*ff;
+  }
+  if(outcome==="CRASHED"){          // 실패는 가장 약한 축이 정한다(min)
+    const rch=(v,thr)=>Math.min(1,Math.max(0,1-Math.max(0,v-thr)/thr));
+    return 40*Math.min(rch(dx,r.zone),rch(dy,r.zone),rch(spd,r.vmax),
+      rch(tilt,10*Math.PI/180),rch(om,10*Math.PI/180));
+  }
+  return 0;                          // OUT OF TIME
+}
+
+// ── 영상 녹화 ───────────────────────────────────────────────────
+function startRec(){
+  stopRec();
+  if(typeof MediaRecorder==="undefined"||!cvs.captureStream){recorder=null;return;}
+  try{
+    if(!recStream)recStream=cvs.captureStream(30);
+    const m=MediaRecorder.isTypeSupported("video/webm;codecs=vp9")?"video/webm;codecs=vp9":"video/webm";
+    recChunks=[]; recorder=new MediaRecorder(recStream,{mimeType:m});
+    recorder.ondataavailable=e=>{if(e.data&&e.data.size)recChunks.push(e.data);};
+    recorder.onstop=()=>{if(recChunks.length)lastVideoBlob=new Blob(recChunks,{type:"video/webm"});};
+    recorder.start();
+  }catch(e){recorder=null;}
+}
+function stopRec(){ try{ if(recorder&&recorder.state!=="inactive")recorder.stop(); }catch(e){} }
+function saveVideo(){
+  if(!lastVideoBlob){ document.getElementById("phys").textContent="저장할 영상이 없습니다 — 에피소드를 한 번 마친 뒤 눌러줘"; return; }
+  const url=URL.createObjectURL(lastVideoBlob), a=document.createElement("a");
+  a.href=url; a.download=`rocket_${roundKey}_${score!=null?Math.round(score):"play"}.webm`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
 }
 
 // ── 물리 한 스텝 (integrate) ────────────────────────────────────
@@ -151,10 +196,11 @@ function step(){
     const spd=Math.hypot(s.vx,s.vy), tilt=Math.abs(wrap(s.theta)), om=Math.abs(s.omega);
     const ok = spd<r.vmax && tilt<10*Math.PI/180 && om<10*Math.PI/180 && Math.abs(s.x)<r.zone;
     outcome=ok?"LANDED":"CRASHED"; s.y=GROUND;
+    score=landingScore();
     if(!ok){ boom=1e-6; explode(spd); }   // 크래시는 속도에 비례해 항상 폭발
   } else if(s.fuel!==null && s.fuel<=0 && th===0 && s.vy<-r.vmax){
     // 연료 소진 후에도 계속 판정은 접지에서
-  } else if(s.step>=MAX_STEPS){ outcome="OUT OF TIME"; }
+  } else if(s.step>=MAX_STEPS){ outcome="OUT OF TIME"; score=landingScore(); }
 }
 function wrap(t){while(t>Math.PI)t-=2*Math.PI;while(t<=-Math.PI)t+=2*Math.PI;return t;}
 
@@ -336,10 +382,15 @@ function drawHUD(){
 }
 function drawBanner(){
   const col=outcome==="LANDED"?"#6edc82":outcome==="CRASHED"?"#e6605a":"#c8c8c8";
-  ctx.textAlign="center";ctx.fillStyle=col;ctx.font="700 30px var(--mono)";
+  ctx.textAlign="center";ctx.fillStyle=col;ctx.font=`700 30px ${MONO}`;
   ctx.fillText(outcome,W/2,Hh/3);
-  ctx.fillStyle="rgba(10,12,24,.6)";ctx.fillRect(W/2-90,Hh/3+18,180,26);
-  ctx.fillStyle="#e6ecf5";ctx.font="14px var(--mono)";ctx.fillText("Press R to retry",W/2,Hh/3+36);
+  if(score!==null){                         // 큰 글씨 점수
+    ctx.fillStyle="#aeb4c6";ctx.font=`700 13px ${MONO}`;ctx.fillText("SCORE",W/2,Hh/3+34);
+    ctx.fillStyle="#fff";ctx.font=`700 58px ${MONO}`;ctx.fillText(Math.round(score),W/2,Hh/3+84);
+  }
+  ctx.fillStyle="rgba(10,12,24,.6)";ctx.fillRect(W/2-135,Hh/3+104,270,24);
+  ctx.fillStyle="#e6ecf5";ctx.font=`13px ${MONO}`;
+  ctx.fillText("R to retry  ·  V to save video",W/2,Hh/3+121);
 }
 
 // ── 루프 ────────────────────────────────────────────────────────
@@ -351,6 +402,9 @@ let lastT=0, acc=0;
 function fixedStep(){
   if(!outcome){ step(); trail.push([S.x,S.y]); if(trail.length>400)trail.shift(); }
   else if(boom>0){ boom=Math.min(1,boom+1/40); }
+  // 종료 후 폭발·점수를 담도록 잠시 더 녹화한 뒤 멈춘다.
+  if(outcome && recStopIn===0 && recorder && recorder.state==="recording") recStopIn=45;
+  if(recStopIn>0 && --recStopIn===0) stopRec();
   updateParticles();
   const tgt=camTarget();
   if(!cam)cam=tgt; else{const k=(boom>0)?Math.min(.35,.12+.2*boom):.12;
@@ -374,6 +428,7 @@ addEventListener("keydown",e=>{
   else if(k==="ArrowLeft"||k==="a")held.left=true;
   else if(k==="ArrowRight"||k==="d")held.right=true;
   else if(k==="r"||k==="R"){trail=[];reset();}
+  else if(k==="v"||k==="V"){saveVideo();}
   else if("1234".includes(k)){const ks=Object.keys(ROUNDS)[+k-1];roundKey=ks;sel.value=ks;trail=[];reset();}
 });
 addEventListener("keyup",e=>{
