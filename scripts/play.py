@@ -22,11 +22,14 @@ import pygame
 
 import rocket_env  # noqa: F401  (환경 등록)
 from rocket_env.config import PRESETS
+from rocket_env.render import EXPLODE_SPEED
 from rocket_env.types import Outcome
 
 THRUST_KEYS_UP = (pygame.K_UP, pygame.K_w)
 THRUST_KEYS_DOWN = (pygame.K_DOWN, pygame.K_s)
 QUIT_KEYS = (pygame.K_ESCAPE, pygame.K_q)
+CRASH_OUTCOMES = (Outcome.CRASH, Outcome.MISSED, Outcome.OUT_OF_FUEL)
+BOOM_FRAMES = 40    # 폭발 연출 길이(프레임)
 
 
 def main() -> None:
@@ -44,8 +47,10 @@ def main() -> None:
     env.render()   # 창을 연다
     print(__doc__)
 
+    unwrapped = env.unwrapped
     thrust = 0          # 현재 추력 단계(0~4). ↑/↓ 로 바꾼다.
     done = False
+    boom_t = 0.0        # 폭발 연출 진행도(0=없음). 빠른 충돌에서 0→1 로 오른다.
     running = True
     while running:
         for event in pygame.event.get():
@@ -56,7 +61,7 @@ def main() -> None:
                     running = False
                 elif event.key == pygame.K_r:
                     obs, info = env.reset()
-                    thrust, done = 0, False
+                    thrust, done, boom_t = 0, False, 0.0
                 elif event.key in THRUST_KEYS_UP:
                     thrust = min(4, thrust + 1)
                 elif event.key in THRUST_KEYS_DOWN:
@@ -77,8 +82,21 @@ def main() -> None:
                 mark = "성공!" if info["is_success"] else "실패"
                 print(f"[{outcome}] {mark}  접지속도 {info['impact_speed']}  "
                       f"(R 로 재시작)")
+                # 빠른 충돌은 폭발한다.
+                if (outcome in CRASH_OUTCOMES
+                        and (info["impact_speed"] or 0.0) > EXPLODE_SPEED):
+                    boom_t = 1e-6   # 다음 프레임부터 폭발 연출 시작
 
-        env.render()   # human 모드는 내부에서 20Hz 로 페이싱한다
+        if boom_t > 0.0:
+            # 충돌 상태를 고정한 채 폭발 연출을 0→1 로 그린다. env.render 대신
+            # 렌더러를 직접 불러 boom 을 넘긴다(env.render 는 boom=0 이라 기체가
+            # 멀쩡히 다시 그려진다).
+            boom_t = min(1.0, boom_t + 1.0 / BOOM_FRAMES)
+            unwrapped._renderer.draw(
+                unwrapped.state, unwrapped._target, unwrapped._outcome,
+                boom=boom_t)
+        else:
+            env.render()   # human 모드는 내부에서 20Hz 로 페이싱한다
 
     env.close()
 
