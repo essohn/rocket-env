@@ -39,7 +39,7 @@ WIDTH_REF_SCALE = 640.0 / 600.0
 # --- 연기 입자 ---
 # 폭발이 여러 프레임에 걸쳐 밑둥에서 연기를 계속 뿜으므로(버섯 기둥) 상한을
 # 넉넉히 둔다 — 안 그러면 오래된 연기가 잘려 기둥이 끊긴다.
-MAX_PARTICLES = 1200
+MAX_PARTICLES = 1600
 PARTICLE_LIFE = 1.6          # 초 — 연기(상승할 시간을 준다)
 SMOKE_COLOR = (215, 215, 225)
 # 분사 연기의 부력. 분사 속도로 뿜어져 나온 뒤 항력으로 느려지면, 이 완만한
@@ -913,6 +913,20 @@ class Renderer:
                 "age": 0.0, "kind": "boom_debris", "life": rng.uniform(0.5, 1.1),
             })
 
+        # 폭발 순간 즉각적인 대량 연기(두 종류 섞임). 이어서 _emit_boom_column
+        # 이 밑둥에서 기둥을 계속 올린다.
+        for _ in range(70):
+            smul, amul = self._boom_smoke_variant()
+            ang = rng.uniform(0, 2 * math.pi)
+            spd = rng.uniform(10.0, 90.0)
+            self._particles.append({
+                "x": ix + rng.uniform(-6, 6), "y": iy + rng.uniform(0, 10),
+                "vx": spd * math.cos(ang), "vy": abs(spd * math.sin(ang)) + 20.0,
+                "y0": iy, "billow": rng.uniform(-1.0, 1.0),
+                "smul": smul, "amul": amul,
+                "age": 0.0, "kind": "boom_smoke", "life": rng.uniform(4.0, 7.5),
+            })
+
     def _emit_boom_column(self) -> None:
         """폭심지 밑둥에서 연기를 계속 솟구치게 한다(버섯구름 기둥).
 
@@ -920,15 +934,23 @@ class Renderer:
         줘, 몇 덩어리로 뭉치지 않고 유기적으로 퍼진다. 각 입자는 충분히 오르면
         제 billow 값만큼 좌우로 말려(_update_particles), 위에서 갓을 이룬다.
         """
-        rng = self._rng
         ix, iy = self._boom_center
-        for _ in range(7):
+        for _ in range(13):    # 다량으로 뿜는다
+            smul, amul = self._boom_smoke_variant()
             self._particles.append({
-                "x": ix + rng.uniform(-7, 7), "y": iy + rng.uniform(0, 12),
-                "vx": rng.uniform(-10, 10), "vy": rng.uniform(50, 120),
-                "y0": iy, "billow": rng.uniform(-1.0, 1.0),
-                "age": 0.0, "kind": "boom_smoke", "life": rng.uniform(4.5, 8.0),
+                "x": ix + self._rng.uniform(-8, 8), "y": iy + self._rng.uniform(0, 12),
+                "vx": self._rng.uniform(-12, 12), "vy": self._rng.uniform(45, 120),
+                "y0": iy, "billow": self._rng.uniform(-1.0, 1.0),
+                "smul": smul, "amul": amul,
+                "age": 0.0, "kind": "boom_smoke", "life": self._rng.uniform(4.5, 8.0),
             })
+
+    def _boom_smoke_variant(self) -> tuple[float, float]:
+        """폭발 연기 한 입자의 (크기 배수, 투명도 배수). 두 종류를 섞는다 —
+        크고 투명한 연기와, 작고 덜 투명한(진한) 연기."""
+        if self._rng.random() < 0.5:
+            return self._rng.uniform(1.5, 2.2), self._rng.uniform(0.35, 0.6)   # 크고 투명
+        return self._rng.uniform(0.45, 0.72), self._rng.uniform(1.15, 1.6)      # 작고 진함
 
     def _shockwave(self, boom: float) -> None:
         """폭심지에서 빠르게 퍼지는 링 모양 충격파. 폭발 극초반에만 보인다."""
@@ -980,9 +1002,13 @@ class Renderer:
                 radius_px = DUST_SIZE_PX
                 color = (*DUST_COLOR, DUST_ALPHA)
             elif kind == "boom_smoke":
-                # 크게 부풀며 천천히 흐려지는 검은 버섯구름
-                radius_px = max(2, int((4.0 + 26.0 * frac) * scale))
-                color = (*BOOM_SMOKE_COLOR, int(200 * (1.0 - frac) ** 1.3))
+                # 크게 부풀며 천천히 흐려지는 검은 버섯구름. 입자마다 크기·
+                # 투명도 배수가 달라 크고 투명한 연기와 작고 진한 연기가 섞인다.
+                smul = p.get("smul", 1.0)
+                amul = p.get("amul", 1.0)
+                radius_px = max(2, int((4.0 + 26.0 * frac) * smul * scale))
+                a = int(200 * amul * (1.0 - frac) ** 1.3)
+                color = (*BOOM_SMOKE_COLOR, min(255, max(0, a)))
             elif kind == "boom_fire":
                 radius_px = max(1, int((3.0 + 8.0 * frac) * scale))
                 # 밝은 코어에서 주황으로 식는다
