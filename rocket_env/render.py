@@ -1137,21 +1137,21 @@ class Renderer:
         fuel_text = ("inf" if capacity is None
                      else f"{state.fuel:6.1f}/{capacity:.0f}")
         lines = [
-            f"alt   {state.y - ROCKET_HEIGHT / 2:7.1f} m",
-            f"speed {speed:7.1f} m/s   (vx {state.vx:6.1f}  vy {state.vy:6.1f})",
-            f"tilt  {math.degrees(state.theta):7.1f} deg",
-            f"fuel  {fuel_text}",
-            f"wind  {state.wind_x:7.1f} m/s",
-            f"step  {state.step:5d} / {self.cfg['max_steps']}",
+            f"alt  {state.y - ROCKET_HEIGHT / 2:6.0f} m",
+            f"spd  {speed:6.1f} m/s",
+            f"tilt {math.degrees(state.theta):6.1f} deg",
+            f"fuel {fuel_text}",
+            f"wind {state.wind_x:6.1f} m/s",
+            f"step {state.step:4d}/{self.cfg['max_steps']}",
         ]
         # 석양 배경은 밝아서 흰 글씨가 묻힌다. 반투명 판을 먼저 깐다 —
-        # 배경이 비치도록 옅게(알파 90).
-        panel = pygame.Surface((330, 20 + len(lines) * 19), pygame.SRCALPHA)
+        # 배경이 비치도록 옅게(알파 90). 폭을 절반(330→160)으로 줄였다.
+        panel = pygame.Surface((160, 18 + len(lines) * 18), pygame.SRCALPHA)
         panel.fill((10, 12, 24, 90))
         self.surface.blit(panel, (6, 6))
         for i, line in enumerate(lines):
             self.surface.blit(
-                self.font.render(line, True, HUD_COLOR), (12, 12 + i * 19))
+                self.font.render(line, True, HUD_COLOR), (12, 11 + i * 18))
 
     def _action_panel(self, action_info) -> None:
         """우측 상단에 행동 공간(5 추력 × 3 노즐) 격자를 그려, 정책이 고른
