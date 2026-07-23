@@ -102,6 +102,26 @@ uv run python scripts/train.py --preset landing-gust  --algo ppo --steps 1500000
 즉 알고리즘을 넘어설수록 더 높은 라운드를 통과할 수 있다. 라운드별 측정치는
 [docs/baselines.md](docs/baselines.md) 참고.
 
+## 직접 조종해 보기 (키보드)
+
+정책 없이 사람이 직접 착륙/포획을 시도해 볼 수 있다 — 환경의 조작감과 난이도를
+몸으로 느끼기에 좋다. 화면이 있는 로컬에서 실행한다.
+
+```bash
+uv run python scripts/play.py --preset landing-basic --livery 내별명
+```
+
+`↑/↓`(추력 단계), `←/→`(노즐), `R`(재시작), `Esc`(종료).
+
+## 로켓 도색 (별명)
+
+`config["livery"]`에 문자열을 넣으면 로켓 몸통에 세로로 새겨진다. 학생이 자기
+별명을 넣어 훈련 영상에서 구분할 수 있다. 로켓 길이를 넘는 글자는 잘린다.
+
+```python
+env = gym.make("rocket-v0", config={"task": "landing", "livery": "Alice"})
+```
+
 ## 개발
 
 ```bash
