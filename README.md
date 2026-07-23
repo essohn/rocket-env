@@ -102,6 +102,22 @@ uv run python scripts/train.py --preset landing-gust  --algo ppo --steps 1500000
 즉 알고리즘을 넘어설수록 더 높은 라운드를 통과할 수 있다. 라운드별 측정치는
 [docs/baselines.md](docs/baselines.md) 참고.
 
+## Colab에서 학습하기
+
+화면·GPU 없이 브라우저만으로 학습·평가·영상까지 되는 자립형 노트북:
+[`notebooks/colab_train.ipynb`](notebooks/colab_train.ipynb). Colab에 업로드하거나
+GitHub 경로로 열면 된다(`https://colab.research.google.com/github/essohn/rocket-env/blob/main/notebooks/colab_train.ipynb`).
+
+설치는 한 줄 — 환경·SB3·영상 인코더까지:
+
+```bash
+pip install "rocket-env[sb3] @ git+https://github.com/essohn/rocket-env.git" imageio imageio-ffmpeg
+```
+
+Colab은 화면이 없으므로 첫 `pygame` import 전에 `os.environ["SDL_VIDEODRIVER"]="dummy"`를
+설정한다(노트북에 포함). 학습·평가·녹화 코드는 노트북에 자체 포함돼 있어 `pip install`
+만으로 충분하다(`scripts/`는 설치에 포함되지 않는다).
+
 ## 직접 조종해 보기 (키보드)
 
 정책 없이 사람이 직접 착륙/포획을 시도해 볼 수 있다 — 환경의 조작감과 난이도를
