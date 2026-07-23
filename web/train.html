@@ -1,0 +1,461 @@
+<meta charset="utf-8">
+<title>로켓 호버 안정화 — 브라우저 DQN 실습</title>
+<style>
+  :root{
+    --bg:#0a0b12; --ink:#e7ecf6; --dim:#878da0;
+    --panel:rgba(12,14,26,.55); --line:rgba(150,160,190,.16);
+    --amber:#ffca5c; --green:#46c35a; --red:#de463a; --blue:#5aa0e6;
+    --mono:ui-monospace,SFMono-Regular,Menlo,"DejaVu Sans Mono",Consolas,"Apple SD Gothic Neo","Malgun Gothic","Noto Sans KR",monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:radial-gradient(120% 80% at 50% -10%, #171a2b 0%, var(--bg) 55%);
+    color:var(--ink); font-family:var(--mono);
+    display:flex; flex-direction:column; align-items:center;
+    min-height:100%; padding:14px; gap:12px;
+  }
+  header{width:100%; max-width:1080px; display:flex; flex-wrap:wrap;
+    align-items:baseline; gap:8px 16px}
+  h1{font-size:15px; font-weight:700; letter-spacing:.1em; text-transform:uppercase;
+    margin:0}
+  h1 .rk{color:var(--amber)}
+  .sub{color:var(--dim); font-size:12px}
+  .spacer{flex:1}
+  a{color:var(--amber); text-decoration:none}
+  .wrap{width:100%; max-width:1080px; display:grid;
+    grid-template-columns:300px 1fr; gap:12px; align-items:start}
+  @media(max-width:760px){.wrap{grid-template-columns:1fr}}
+  .panel{background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:12px 14px}
+  .controls h2{font-size:11px; letter-spacing:.14em; text-transform:uppercase;
+    color:var(--dim); margin:2px 0 10px}
+  .row{display:flex; align-items:center; justify-content:space-between; gap:8px;
+    margin:7px 0; font-size:12px}
+  .row label{color:var(--dim)}
+  .row .hint{color:#5b6076; font-size:10px}
+  input[type=text],input[type=number]{
+    font-family:var(--mono); font-size:12px; color:var(--ink);
+    background:#12141f; border:1px solid var(--line); border-radius:6px;
+    padding:5px 7px; width:96px; text-align:right; outline:none}
+  input:focus{border-color:var(--amber)}
+  .btns{display:flex; gap:8px; margin-top:12px}
+  button{font-family:var(--mono); font-size:12px; font-weight:700; color:#0a0b12;
+    background:var(--amber); border:0; border-radius:7px; padding:8px 12px;
+    cursor:pointer; flex:1}
+  button.ghost{background:#20232f; color:var(--ink); border:1px solid var(--line)}
+  button:active{transform:translateY(1px)}
+  .viz{display:flex; flex-direction:column; gap:12px}
+  .stats{display:grid; grid-template-columns:repeat(4,1fr); gap:8px}
+  .stat{background:var(--panel); border:1px solid var(--line); border-radius:10px;
+    padding:8px 10px}
+  .stat .k{color:var(--dim); font-size:10px; letter-spacing:.08em; text-transform:uppercase}
+  .stat .v{font-size:17px; font-weight:700; margin-top:2px; font-variant-numeric:tabular-nums}
+  .stage{border:1px solid var(--line); border-radius:12px; overflow:hidden;
+    background:#06060e; position:relative}
+  .stage .cap{position:absolute; top:8px; left:10px; font-size:11px; color:var(--dim);
+    letter-spacing:.06em}
+  canvas{display:block; width:100%}
+  .note{width:100%; max-width:1080px; color:#6b7089; font-size:11px; line-height:1.6}
+  .note b{color:var(--dim); font-weight:700}
+</style>
+
+<header>
+  <h1><span class="rk">▲</span> 로켓 호버 안정화 · 브라우저 DQN 실습</h1>
+  <span class="sub">목표 높이 유지 과제 · 정식 착륙은 Colab, 여기선 제어·튜닝 감각 연습</span>
+  <span class="spacer"></span>
+  <span class="sub"><a href="play.html">→ 수동 조종(play)</a></span>
+</header>
+
+<div class="wrap">
+  <section class="panel controls">
+    <h2>하이퍼파라미터</h2>
+    <div class="row"><label title="은닉층 크기, 쉼표 구분 (net_arch)">net_arch</label>
+      <input type="text" id="arch" value="64,64"></div>
+    <div class="row"><label title="learning_rate">learning_rate</label>
+      <input type="number" id="lr" value="0.0005" step="0.0005" min="0"></div>
+    <div class="row"><label title="할인율 gamma (호버는 근시야로 충분·안정)">gamma</label>
+      <input type="number" id="gamma" value="0.95" step="0.01" min="0" max="1"></div>
+    <div class="row"><label title="batch_size">batch_size</label>
+      <input type="number" id="batch" value="64" step="16" min="8"></div>
+    <div class="row"><label title="replay buffer_size">buffer_size</label>
+      <input type="number" id="buffer" value="50000" step="5000" min="1000"></div>
+    <div class="row"><label title="학습 시작 전 채울 스텝 (learning_starts)">learning_starts</label>
+      <input type="number" id="lstart" value="1000" step="500" min="0"></div>
+    <div class="row"><label title="env 몇 스텝마다 1 gradient (train_freq)">train_freq</label>
+      <input type="number" id="tfreq" value="4" step="1" min="1"></div>
+    <div class="row"><label title="타깃망 동기화 주기 (target_update_interval)">target_update</label>
+      <input type="number" id="tsync" value="1000" step="100" min="10"></div>
+    <div class="row"><label title="ε를 1→final 로 줄이는 스텝 수">ε_decay_steps</label>
+      <input type="number" id="epss" value="30000" step="1000" min="100"></div>
+    <div class="row"><label title="최종 ε (exploration_final_eps)">ε_final</label>
+      <input type="number" id="epsf" value="0.05" step="0.01" min="0" max="1"></div>
+    <div class="row"><label title="에피소드 최대 스텝">max_steps</label>
+      <input type="number" id="maxstep" value="200" step="50" min="50"></div>
+    <div class="btns">
+      <button id="run">▶ 학습 시작</button>
+      <button id="reset" class="ghost">초기화</button>
+    </div>
+    <p class="row hint" style="margin-top:10px; display:block; line-height:1.6">
+      구조값(net_arch·buffer·batch)은 <b>초기화</b> 때 반영됩니다. lr·gamma·ε 등은
+      학습 중에도 즉시 반영돼요. 값을 바꿔가며 곡선이 어떻게 달라지는지 관찰해 보세요.</p>
+  </section>
+
+  <section class="viz">
+    <div class="stats">
+      <div class="stat"><div class="k">episode</div><div class="v" id="s_ep">0</div></div>
+      <div class="stat"><div class="k">안정유지(50)</div><div class="v" id="s_sr">0%</div></div>
+      <div class="stat"><div class="k">평균보상(20)</div><div class="v" id="s_mr">–</div></div>
+      <div class="stat"><div class="k">steps/s</div><div class="v" id="s_sps">0</div></div>
+      <div class="stat"><div class="k">total steps</div><div class="v" id="s_ts">0</div></div>
+      <div class="stat"><div class="k">epsilon</div><div class="v" id="s_eps">1.00</div></div>
+      <div class="stat"><div class="k">best</div><div class="v" id="s_best">–</div></div>
+      <div class="stat"><div class="k">last</div><div class="v" id="s_last">–</div></div>
+    </div>
+    <div class="stage"><span class="cap">현재 정책 — 초록 점선(목표 높이)에 떠서 유지</span>
+      <canvas id="watch" width="720" height="300"></canvas></div>
+    <div class="stage"><span class="cap">에피소드 보상 · 이동평균(20)</span>
+      <canvas id="chart" width="720" height="220"></canvas></div>
+  </section>
+</div>
+
+<p class="note">
+  <b>이게 뭔가요?</b> 순수 JS로 구현한 <b>DQN</b> 이 브라우저에서 실시간으로 <b>호버 안정화</b>를
+  학습합니다 — 패드 근처에서 교란된 채 시작한 로켓을 스로틀·짐벌로 제어해 목표 높이(초록 점선)에
+  떠서 자세·위치를 유지하는 과제입니다. 기본값이면 대개 1~2분 안에 곡선이 오르고 안정유지 성공률이
+  올라갑니다(PC 성능에 따라 다름).
+  <br><br>
+  <b>왜 착륙이 아니라 호버?</b> 진짜 착륙(고고도에서 정밀 제동)은 from-scratch DQN 이 수 분 안에
+  발견하지 못합니다 — 정식 착륙 학습은 Colab(SB3, 수십만 스텝)의 몫입니다. 대신 이 호버 과제로
+  <b>스로틀·자세 제어와 하이퍼파라미터 감각</b>을 손끝으로 익히세요: 학습률을 키우면 곡선이
+  요동치고, 망을 키우면 느려지고, ε를 빨리 줄이면 일찍 수렴하지만 갇히기 쉽습니다. 하이퍼파라미터
+  이름은 SB3 와 동일합니다.
+</p>
+
+<script>
+"use strict";
+// ── 물리 상수 (physics.py / play.html 과 동일) ──────────────────
+const G=9.8, DT=0.05, H=50, MI=H*H/12, PHI_MAX=8*Math.PI/180;
+const VT=250, RHO=G/VT;
+const THRUST=[0, 0.6*G, 1.0*G, 1.6*G, 2.5*G];
+const NOZ=[-120*Math.PI/180, 0, 120*Math.PI/180];
+const NACT=15;                         // 5 추력 × 3 노즐 = Discrete(15)
+const GROUND=H/2;
+// basic 라운드 초기분포·성공 임계값
+const Y0=250, VY0=-20, X0=30, TH0=5*Math.PI/180, OM0=[6,10];
+const VMAX=15, ZONE=50, TILTMAX=10*Math.PI/180, OMMAX=10*Math.PI/180;
+
+const rand=(a,b)=>a+Math.random()*(b-a);
+const clamp=(v,a,b)=>v<a?a:v>b?b:v;
+function wrap(t){while(t>Math.PI)t-=2*Math.PI;while(t<=-Math.PI)t+=2*Math.PI;return t;}
+let _g2=null;
+function gauss(){ if(_g2!==null){const v=_g2;_g2=null;return v;}
+  const u=Math.max(1e-12,Math.random()), v=Math.random();
+  const r=Math.sqrt(-2*Math.log(u)); _g2=r*Math.sin(2*Math.PI*v); return r*Math.cos(2*Math.PI*v); }
+
+// ── 환경: 호버 안정화 (목표 높이에 로켓을 정지·유지) ─────────────
+// 왜 착륙이 아니라 호버냐: from-scratch DQN 은 수 분 내 진짜 착륙(고고도에서
+// 정밀 제동)을 발견하지 못한다(실측). 반면 "목표 높이에 떠서 자세·위치를
+// 유지"는 목표 자체가 안정적 끌개라 밀집 보상으로 확실히 학습된다(0→100%).
+// 스로틀 제어·자세 제어·하이퍼파라미터 감각은 그대로 배운다.
+const TARGET=10;            // 패드 위 목표 호버 높이(m)
+let MAXSTEP=200;
+function envReset(){        // 패드 근처에서 교란된 상태로 시작
+  return {x:rand(-12,12), y:GROUND+rand(6,18), vx:0, vy:rand(-3,1),
+    theta:rand(-6,6)*Math.PI/180, omega:(Math.random()<.5?-1:1)*rand(3,7)*Math.PI/180,
+    phi:0, step:0};
+}
+function obsOf(s){ return [
+  s.x/900, (s.y-GROUND-TARGET)/900, s.vx/200, s.vy/200,   // dy 는 목표 기준
+  Math.sin(s.theta), Math.cos(s.theta), s.omega/(Math.PI/2),
+  s.phi/PHI_MAX, 1, 0, s.step/MAXSTEP]; }
+// 밀집 보상: 목표 높이 유지 + 저속 + 수직 + 중심. 지면충돌·이탈은 페널티.
+function envStep(s,a){
+  const th=THRUST[(a/3)|0], noz=NOZ[a%3];
+  const tt=-th*Math.sin(s.phi), ta=th*Math.cos(s.phi);
+  const fx=tt*Math.cos(s.theta)-ta*Math.sin(s.theta);
+  const fy=tt*Math.sin(s.theta)+ta*Math.cos(s.theta);
+  const ax=fx-RHO*s.vx, ay=fy-G-RHO*s.vy, al=tt*(H/2)/MI;
+  s.x+=s.vx*DT+.5*ax*DT*DT; s.y+=s.vy*DT+.5*ay*DT*DT;
+  s.vx+=ax*DT; s.vy+=ay*DT;
+  s.theta+=s.omega*DT+.5*al*DT*DT; s.omega+=al*DT;
+  s.phi=clamp(s.phi+noz*DT,-PHI_MAX,PHI_MAX);
+  s.step++;
+  const dy=s.y-GROUND, spd=Math.hypot(s.vx,s.vy), tilt=Math.abs(wrap(s.theta)),
+    om=Math.abs(s.omega), axp=Math.abs(s.x);
+  // 양수·단조: 목표 높이에 느리고·수직으로·중심에 떠 있을수록 매 스텝 1점에
+  // 가깝다. 잘 떠 있을수록 오래·높게 쌓여 보상 곡선이 실력과 함께 상승한다.
+  let r=Math.exp(-(Math.abs(dy-TARGET)/12 + spd/8 + tilt/0.18 + om/0.18 + axp/40));
+  let term=false, trunc=false;
+  if(s.y<=GROUND){ s.y=GROUND; r-=5; term=true; }        // 지면 충돌 = 실패
+  else if(dy>120){ r-=5; term=true; }                     // 날아가버림 = 실패
+  else if(s.step>=MAXSTEP){ trunc=true; }                 // 200스텝 생존
+  // 성공: 목표 높이 근처에서 느리고·수직이고·중심에 안정적으로 도달
+  const ok = dy>3 && dy<TARGET+12 && spd<6 && tilt<TILTMAX && om<OMMAX && axp<ZONE;
+  return {o:obsOf(s), r, term, trunc, ok};
+}
+
+// ── MLP (순수 JS, He 초기화 · ReLU 은닉 · 선형 출력) ─────────────
+function makeMLP(sizes){
+  const L=sizes.length-1, W=[], b=[];
+  for(let l=0;l<L;l++){ const inN=sizes[l], outN=sizes[l+1];
+    const w=new Float64Array(outN*inN), std=Math.sqrt(2/inN);
+    for(let k=0;k<w.length;k++) w[k]=gauss()*std;
+    W.push(w); b.push(new Float64Array(outN)); }
+  return {sizes,L,W,b};
+}
+function forward(net,x){                       // x: number[] 길이 sizes[0]
+  const acts=[x], pre=[]; let a=x;
+  for(let l=0;l<net.L;l++){ const inN=net.sizes[l], outN=net.sizes[l+1], w=net.W[l], bb=net.b[l];
+    const z=new Float64Array(outN);
+    for(let o=0;o<outN;o++){ let sum=bb[o]; const base=o*inN; for(let i=0;i<inN;i++) sum+=w[base+i]*a[i]; z[o]=sum; }
+    pre.push(z);
+    if(l<net.L-1){ const an=new Float64Array(outN); for(let o=0;o<outN;o++) an[o]=z[o]>0?z[o]:0; a=an; }
+    else a=z;
+    acts.push(a); }
+  return {acts,pre};
+}
+function qOf(net,x){ return forward(net,x).acts[net.L]; }
+function backward(net,fwd,gradOut,gW,gb){       // gradOut: Float64Array 길이 sizes[L]
+  let delta=gradOut;
+  for(let l=net.L-1;l>=0;l--){ const inN=net.sizes[l], outN=net.sizes[l+1], a=fwd.acts[l], w=net.W[l];
+    const gw=gW[l], gbb=gb[l];
+    for(let o=0;o<outN;o++){ const d=delta[o]; if(d!==0){ gbb[o]+=d; const base=o*inN;
+      for(let i=0;i<inN;i++) gw[base+i]+=d*a[i]; } }
+    if(l>0){ const da=new Float64Array(inN);
+      for(let o=0;o<outN;o++){ const d=delta[o]; if(d!==0){ const base=o*inN;
+        for(let i=0;i<inN;i++) da[i]+=w[base+i]*d; } }
+      const zp=fwd.pre[l-1]; for(let i=0;i<inN;i++) if(zp[i]<=0) da[i]=0;
+      delta=da; }
+  }
+}
+function zerosLike(net){ const gW=[],gb=[];
+  for(let l=0;l<net.L;l++){ gW.push(new Float64Array(net.W[l].length)); gb.push(new Float64Array(net.b[l].length)); }
+  return {gW,gb}; }
+function makeAdam(net){ const mW=[],vW=[],mb=[],vb=[];
+  for(let l=0;l<net.L;l++){ mW.push(new Float64Array(net.W[l].length)); vW.push(new Float64Array(net.W[l].length));
+    mb.push(new Float64Array(net.b[l].length)); vb.push(new Float64Array(net.b[l].length)); }
+  return {mW,vW,mb,vb,t:0}; }
+function adamStep(net,opt,gW,gb,lr,batch){
+  opt.t++; const b1=.9,b2=.999,eps=1e-8, c1=1-Math.pow(b1,opt.t), c2=1-Math.pow(b2,opt.t);
+  const upd=(P,Gg,M,V)=>{ for(let k=0;k<P.length;k++){ const g=Gg[k]/batch;
+    M[k]=b1*M[k]+(1-b1)*g; V[k]=b2*V[k]+(1-b2)*g*g;
+    P[k]-=lr*(M[k]/c1)/(Math.sqrt(V[k]/c2)+eps); Gg[k]=0; } };
+  for(let l=0;l<net.L;l++){ upd(net.W[l],gW[l],opt.mW[l],opt.vW[l]); upd(net.b[l],gb[l],opt.mb[l],opt.vb[l]); }
+}
+function copyInto(dst,src){ for(let l=0;l<src.L;l++){ dst.W[l].set(src.W[l]); dst.b[l].set(src.b[l]); } }
+// 전역 그래디언트 노름 클립 — 발산 방지(안정 학습에 중요)
+function clipGrad(gW,gb,maxn){ let s=0;
+  for(const a of gW)for(let k=0;k<a.length;k++)s+=a[k]*a[k];
+  for(const a of gb)for(let k=0;k<a.length;k++)s+=a[k]*a[k];
+  const n=Math.sqrt(s); if(n>maxn){ const f=maxn/n;
+    for(const a of gW)for(let k=0;k<a.length;k++)a[k]*=f;
+    for(const a of gb)for(let k=0;k<a.length;k++)a[k]*=f; } }
+
+// ── 리플레이 버퍼 (링) ──────────────────────────────────────────
+let buf, bufCap, bufN, bufI;
+function bufInit(cap){ bufCap=cap; buf=new Array(cap); bufN=0; bufI=0; }
+function bufPush(t){ buf[bufI]=t; bufI=(bufI+1)%bufCap; if(bufN<bufCap)bufN++; }
+function bufSample(){ return buf[(Math.random()*bufN)|0]; }
+
+// ── DQN 상태 & 하이퍼파라미터 ───────────────────────────────────
+let online, target, opt, grads;
+let HP={};
+function readStructural(){
+  const arch=($('arch').value.split(',').map(s=>parseInt(s.trim())).filter(n=>n>0&&n<=512));
+  return { arch: arch.length?arch:[64,64],
+    buffer: Math.max(1000,parseInt($('buffer').value)||50000),
+    batch: Math.max(8,parseInt($('batch').value)||64) };
+}
+function readLive(){
+  HP.lr=Math.max(0,parseFloat($('lr').value)||0.0005);
+  HP.gamma=clamp(parseFloat($('gamma').value)||0.95,0,0.9999);
+  HP.lstart=Math.max(0,parseInt($('lstart').value)||1000);
+  HP.tfreq=Math.max(1,parseInt($('tfreq').value)||4);
+  HP.tsync=Math.max(10,parseInt($('tsync').value)||1000);
+  HP.epss=Math.max(100,parseInt($('epss').value)||30000);
+  HP.epsf=clamp(parseFloat($('epsf').value)||0.05,0,1);
+  MAXSTEP=Math.max(50,parseInt($('maxstep').value)||200);
+}
+const $=id=>document.getElementById(id);
+
+// ── 학습 진행 상태 ──────────────────────────────────────────────
+let trainS, lastO, totalSteps, episodes, epR, rewards, succ, best;
+function buildAll(){
+  const st=readStructural(); readLive();
+  HP.batch=st.batch;
+  online=makeMLP([11,...st.arch,NACT]); target=makeMLP([11,...st.arch,NACT]);
+  copyInto(target,online); opt=makeAdam(online); grads=zerosLike(online);
+  bufInit(st.buffer);
+  trainS=envReset(); lastO=obsOf(trainS);
+  totalSteps=0; episodes=0; epR=0; rewards=[]; succ=[]; best=null;
+  spsAcc=0; spsT=0; sps=0;
+}
+function curEps(){ return Math.max(HP.epsf, 1-(1-HP.epsf)*totalSteps/HP.epss); }
+function act(net,o,eps){ if(Math.random()<eps) return (Math.random()*NACT)|0;
+  const q=qOf(net,o); let a=0,m=q[0]; for(let k=1;k<NACT;k++) if(q[k]>m){m=q[k];a=k;} return a; }
+function learn(){
+  const bs=HP.batch, gW=grads.gW, gb=grads.gb;
+  for(let n=0;n<bs;n++){ const tr=bufSample();
+    // Double DQN: 다음 행동은 online 망으로 고르고, 그 가치는 target 망으로
+    // 평가한다. Q 과대추정을 줄여 정책 붕괴(deadly triad)를 막는다 — 이게
+    // 없으면 100%까지 갔다가 갑자기 무너지는 일이 생긴다(실측).
+    const qo2=qOf(online,tr.s2); let ba=0,bm=qo2[0];
+    for(let k=1;k<NACT;k++) if(qo2[k]>bm){bm=qo2[k];ba=k;}
+    const q2=qOf(target,tr.s2);
+    const y = tr.term ? tr.r : tr.r + HP.gamma*q2[ba];
+    const fwd=forward(online,tr.s); const q=fwd.acts[online.L];
+    let err=q[tr.a]-y; if(err>1)err=1; else if(err<-1)err=-1;   // Huber(δ=1) 기울기
+    const go=new Float64Array(NACT); go[tr.a]=err;
+    backward(online,fwd,go,gW,gb);
+  }
+  clipGrad(gW,gb,10*bs);
+  adamStep(online,opt,gW,gb,HP.lr,bs);
+}
+function trainTick(){
+  readLive();
+  const eps=curEps();
+  const a=act(online,lastO,eps);
+  const r=envStep(trainS,a);
+  bufPush({s:lastO,a,r:r.r,s2:r.o,term:r.term});   // trunc 은 부트스트랩 유지(term=false)
+  lastO=r.o; totalSteps++; epR+=r.r;
+  if(totalSteps%HP.tfreq===0 && bufN>=Math.max(HP.batch,HP.lstart)) learn();
+  if(totalSteps%HP.tsync===0) copyInto(target,online);
+  if(r.term||r.trunc){
+    episodes++; rewards.push(epR); if(rewards.length>2000)rewards.shift();
+    succ.push(r.ok?1:0); if(succ.length>200)succ.shift();   // 목표 근처 안정 도달
+    if(best===null||epR>best)best=epR;
+    epR=0; trainS=envReset(); lastO=obsOf(trainS);
+  }
+}
+
+// ── 관전 에피소드 (greedy, 고정 timestep) ───────────────────────
+let watchS=null, wOut=null;
+const wcv=$('watch'), wx=wcv.getContext('2d');
+function watchReset(){ watchS=envReset(); wCam=null; }
+let wCam=null, wAcc=0;
+function watchStep(){ if(!watchS){watchReset();return;}
+  const a=act(online,obsOf(watchS),0);          // greedy
+  const r=envStep(watchS,a);
+  if(r.term||r.trunc){ wOut=r.ok?'HOLDING':'LOST'; wLast=watchS; watchS=null; wHold=25; }
+}
+let wOutcome=null, wLast=null, wHold=0;
+function watchCamTarget(s){ const cx=(s.x)/2, cy=(s.y+GROUND)/2;
+  const spanx=Math.abs(s.x)+2.4*H, spany=Math.abs(s.y-GROUND)+2.4*H;
+  let sc=Math.min(wcv.width/spanx, wcv.height/spany); sc=clamp(sc,wcv.width/900,10);
+  return [cx,cy,sc]; }
+function wTo(px,py){ const[cx,cy,sc]=wCam; return [wcv.width/2+(px-cx)*sc, wcv.height/2-(py-cy)*sc]; }
+function drawWatch(){
+  const s=watchS||wLast; if(!s){ wx.fillStyle="#06060e"; wx.fillRect(0,0,wcv.width,wcv.height); return; }
+  const tgt=watchCamTarget(s); if(!wCam)wCam=tgt; else for(let i=0;i<3;i++) wCam[i]+=(tgt[i]-wCam[i])*.15;
+  const sc=wCam[2];
+  // 하늘
+  const g=wx.createLinearGradient(0,0,0,wcv.height);
+  g.addColorStop(0,"#2a2450"); g.addColorStop(1,"#c88460");
+  wx.fillStyle=g; wx.fillRect(0,0,wcv.width,wcv.height);
+  // 지면 + 패드
+  const[,gy]=wTo(0,0), [lx]=wTo(-ZONE,0), [rx]=wTo(ZONE,0);
+  wx.fillStyle="#24262c"; wx.fillRect(0,gy,wcv.width,wcv.height-gy);
+  wx.strokeStyle="#c8be5a"; wx.lineWidth=Math.max(2,4*sc/1.5);
+  wx.beginPath(); wx.moveTo(lx,gy); wx.lineTo(rx,gy); wx.stroke();
+  // 목표 호버 높이 마커(초록 점선) — 로켓이 여기 떠서 자세를 유지하면 성공
+  const[tlx,tly]=wTo(-ZONE,GROUND+TARGET), [trx2]=wTo(ZONE,GROUND+TARGET);
+  const holding = s.step>0 && Math.abs(s.y-GROUND-TARGET)<12 && Math.hypot(s.vx,s.vy)<6;
+  wx.strokeStyle = holding ? "rgba(110,220,130,.9)" : "rgba(150,180,210,.45)";
+  wx.lineWidth=1.5; wx.setLineDash([7,5]);
+  wx.beginPath(); wx.moveTo(tlx,tly); wx.lineTo(trx2,tly); wx.stroke(); wx.setLineDash([]);
+  // 로켓
+  const ct=Math.cos(s.theta), si=Math.sin(s.theta), w=4.2;
+  const bTo=(bx,by)=>wTo(s.x+bx*ct-by*si, s.y+bx*si+by*ct);
+  const body=[[-w,-H/2+4],[w,-H/2+4],[w,H/2-1.5],[w-1.4,H/2],[-w+1.4,H/2],[-w,H/2-1.5]];
+  wx.fillStyle="#e8eaee"; wx.beginPath();
+  body.forEach((p,i)=>{const[x,y]=bTo(p[0],p[1]); i?wx.lineTo(x,y):wx.moveTo(x,y);});
+  wx.closePath(); wx.fill();
+  wx.fillStyle="#787d87"; wx.beginPath();
+  [[-w-1.2,-H/2],[w+1.2,-H/2],[w,-H/2+5],[-w,-H/2+5]].forEach((p,i)=>{const[x,y]=bTo(p[0],p[1]); i?wx.lineTo(x,y):wx.moveTo(x,y);});
+  wx.closePath(); wx.fill();
+  // 화염 (현재 행동 추정: greedy)
+  if(watchS){ const a=act(online,obsOf(s),0), th=THRUST[(a/3)|0];
+    if(th>0){ const ratio=th/(2.5*G), len=8+60*Math.pow(ratio,.75), hw=1.8+2.6*ratio;
+      const abx=Math.sin(s.phi), aby=-Math.cos(s.phi);
+      const axx=abx*ct-aby*si, axy=abx*si+aby*ct, px=-axy, py=axx;
+      const nx=s.x-(-H/2)*si, ny=s.y+(-H/2)*ct;
+      wx.fillStyle="rgba(255,150,60,.9)"; wx.beginPath();
+      const tip=wTo(nx+axx*len, ny+axy*len), l=wTo(nx+px*hw,ny+py*hw), rr=wTo(nx-px*hw,ny-py*hw);
+      wx.moveTo(l[0],l[1]); wx.lineTo(tip[0],tip[1]); wx.lineTo(rr[0],rr[1]); wx.closePath(); wx.fill(); } }
+  if(wOutcome && wHold>0){ wx.textAlign="center"; wx.font="700 20px var(--mono)";
+    wx.fillStyle=wOutcome==="HOLDING"?"#6edc82":"#e6605a";
+    wx.fillText(wOutcome, wcv.width/2, 40); }
+}
+
+// ── 보상 곡선 ───────────────────────────────────────────────────
+const ccv=$('chart'), cx2=ccv.getContext('2d');
+function drawChart(){
+  const W=ccv.width, Hc=ccv.height, pad=28;
+  cx2.fillStyle="#06060e"; cx2.fillRect(0,0,W,Hc);
+  if(rewards.length<2){ cx2.fillStyle="#5b6076"; cx2.font="12px var(--mono)"; cx2.textAlign="center";
+    cx2.fillText("에피소드가 쌓이면 곡선이 그려집니다…", W/2, Hc/2); return; }
+  let lo=Infinity, hi=-Infinity; for(const v of rewards){ if(v<lo)lo=v; if(v>hi)hi=v; }
+  if(hi-lo<1){hi+=1;lo-=1;} const padv=(hi-lo)*.08; lo-=padv; hi+=padv;
+  const X=i=>pad+(W-pad-8)*i/(rewards.length-1), Y=v=>Hc-pad-(Hc-pad-8)*(v-lo)/(hi-lo);
+  // 0선
+  if(lo<0&&hi>0){ cx2.strokeStyle="rgba(150,160,190,.2)"; cx2.lineWidth=1;
+    cx2.beginPath(); cx2.moveTo(pad,Y(0)); cx2.lineTo(W-8,Y(0)); cx2.stroke(); }
+  // 원 보상 (옅게)
+  cx2.strokeStyle="rgba(90,160,230,.35)"; cx2.lineWidth=1; cx2.beginPath();
+  rewards.forEach((v,i)=>{const x=X(i),y=Y(v); i?cx2.lineTo(x,y):cx2.moveTo(x,y);}); cx2.stroke();
+  // 이동평균 20
+  cx2.strokeStyle="#ffca5c"; cx2.lineWidth=2; cx2.beginPath(); let started=false;
+  for(let i=0;i<rewards.length;i++){ const a=Math.max(0,i-19); let s=0; for(let j=a;j<=i;j++)s+=rewards[j];
+    const m=s/(i-a+1), x=X(i), y=Y(m); if(!started){cx2.moveTo(x,y);started=true;}else cx2.lineTo(x,y); }
+  cx2.stroke();
+  cx2.fillStyle="#878da0"; cx2.font="10px var(--mono)"; cx2.textAlign="left";
+  cx2.fillText(hi.toFixed(0), 3, Y(hi)+9); cx2.fillText(lo.toFixed(0), 3, Y(lo)-2);
+}
+
+// ── HUD 갱신 ────────────────────────────────────────────────────
+function fmt(v){ return v===null?"–":(v>=0?"+":"")+v.toFixed(0); }
+function updateStats(){
+  $('s_ep').textContent=episodes;
+  const sr=succ.length?Math.round(100*succ.reduce((a,b)=>a+b,0)/succ.length):0;
+  $('s_sr').textContent=sr+"%"; $('s_sr').style.color=sr>=50?"var(--green)":sr>=20?"var(--amber)":"var(--ink)";
+  const last20=rewards.slice(-20); const mr=last20.length?last20.reduce((a,b)=>a+b,0)/last20.length:null;
+  $('s_mr').textContent= mr===null?"–":fmt(mr);
+  $('s_sps').textContent=sps; $('s_ts').textContent=totalSteps.toLocaleString();
+  $('s_eps').textContent=curEps().toFixed(2);
+  $('s_best').textContent=fmt(best);
+  $('s_last').textContent=rewards.length?fmt(rewards[rewards.length-1]):"–";
+}
+
+// ── 루프 ────────────────────────────────────────────────────────
+let running=false, spsAcc=0, spsT=0, sps=0;
+const WSTEP_MS=DT*1000;
+function frame(now){
+  if(running){
+    // 학습: 프레임당 ~12ms 예산만큼 최대한 스텝 (PC 성능에 따라 자동 조절)
+    const t0=performance.now(); let n=0;
+    while(performance.now()-t0<12){ for(let k=0;k<8;k++) trainTick(); n+=8;
+      if(performance.now()-t0>=12)break; }
+    spsAcc+=n; spsT+=(now-(lastNow||now));
+    if(spsT>=500){ sps=Math.round(spsAcc/spsT*1000); spsAcc=0; spsT=0; }
+  }
+  lastNow=now;
+  // 관전: 고정 timestep 으로 부드럽게
+  wAcc+=now-(lastW||now); lastW=now; wAcc=Math.min(wAcc,200);
+  while(wAcc>=WSTEP_MS){ if(running||watchS){ watchStep(); } wAcc-=WSTEP_MS;
+    if(wHold>0){wHold--; if(wHold===0){wOutcome=wOut;} } }
+  wOutcome = wHold>0 ? wOut : null;
+  drawWatch(); drawChart(); updateStats();
+  requestAnimationFrame(frame);
+}
+let lastNow=0, lastW=0;
+
+// ── 컨트롤 ──────────────────────────────────────────────────────
+$('run').addEventListener('click',()=>{
+  running=!running; $('run').textContent= running? "⏸ 일시정지":"▶ 학습 재개"; });
+$('reset').addEventListener('click',()=>{
+  buildAll(); watchReset(); wOut=wOutcome=null; wHold=0;
+  running=false; $('run').textContent="▶ 학습 시작"; });
+
+buildAll(); watchReset(); requestAnimationFrame(frame);
+</script>
