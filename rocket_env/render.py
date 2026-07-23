@@ -107,13 +107,17 @@ TOWER_HEIGHT_FACTOR = 1.3
 SKY_TOP = (28, 26, 66)
 SKY_MID = (188, 88, 84)
 SKY_BOTTOM = (255, 178, 98)
+# 하늘은 월드 좌표(고도)에 고정된다. 지면(y=0)이 지평선 주황, 이 고도에서
+# 천정의 짙은 보라. 카메라가 화면 고정이 아니라 고도에 따라 색이 정해져,
+# 내려갈수록 노을이 차오른다.
+SKY_WORLD_TOP = 1400.0
 GROUND_COLOR = (38, 40, 44)
-GROUND_LABEL_TEXT = "인공지능의 이해와 활용 2026-2"
-GROUND_LABEL_COLOR = (120, 122, 96)   # 어두운 지면에 새긴 듯 은은하게
-# 착륙 줌인(배율 ~5.8)에서도 전체 문구가 화면(640px) 안에 들어오도록 폭을
-# 잡는다. 640/5.8 ≈ 110 m.
-GROUND_LABEL_WORLD_W = 110.0          # 지면에서 차지하는 폭 (m)
-GROUND_LABEL_Y = -22.0                # 지표 아래(지면 위에 새긴 위치)
+# 강의명을 하늘 높은 곳(월드 고정)에 띄운다. 로켓이 높은 초반에만 보이고,
+# 내려갈수록 위로 스쳐 사라진다.
+SKY_LABEL_TEXT = "인공지능의 이해와 활용 2026-2"
+SKY_LABEL_COLOR = (240, 226, 214)     # 노을 하늘에 밝게
+SKY_LABEL_WORLD_W = 260.0             # 하늘에서 차지하는 폭 (m)
+SKY_LABEL_Y = 1050.0                  # 고고도 — 초반 낙하 구간
 PAD_COLOR = (200, 190, 90)
 TOWER_COLOR = (150, 155, 165)
 ARM_COLOR = (230, 120, 60)
@@ -196,16 +200,13 @@ class Renderer:
             self.surface = pygame.Surface((WIDTH, HEIGHT))
             self.clock = None
 
-        # 하늘 그라디언트는 매 프레임 960줄을 다시 그릴 이유가 없다.
-        # 한 번 만들어두고 blit한다.
-        self._sky_surface = self._build_sky()
-        # 기체 도색도 마찬가지로 한 번만 만들어 캐시한다.
+        # 기체 도색은 한 번만 만들어 캐시한다.
         self._livery = self._build_livery()
         # 구름도 고정 시드로 한 번 만들어 재사용한다 — 매 에피소드, 매
         # 렌더러 인스턴스에서 같은 하늘이 보여야 한다(재현성).
         self._clouds = self._build_clouds()
-        # 지면에 새겨진 강의명 라벨(한글). 한 번 렌더해 캐시한다.
-        self._ground_label_surf = self._build_ground_label()
+        # 하늘에 띄울 강의명 라벨(한글). 한 번 렌더해 캐시한다.
+        self._sky_label_surf = self._build_sky_label()
 
     # --- 공개 API ---
 
@@ -219,8 +220,13 @@ class Renderer:
 
     def draw(self, state: State, target: tuple[float, float],
              outcome: str, grip: float | None = None, settle: float = 0.0,
-             boom: float = 0.0, hold_camera: bool = False):
+             boom: float = 0.0, hold_camera: bool = False,
+             action_info=None):
         """한 프레임을 그린다.
+
+        `action_info`(선택)는 우측 상단 행동 시각화에 쓴다. 정수(선택된 행동
+        0~14) 또는 {"chosen": int, "values": [15개]} 딕셔너리다. values 가
+        있으면 각 행동의 출력값(Q값/확률)을 칸 밝기로도 표시한다.
 
         `grip`은 순전히 연출용 상태다(0=벌어짐, 1=다 묾) — 물리에는
         전혀 관여하지 않는다. 기본값 0.0이라 기존 호출부(테스트 등)는
@@ -254,7 +260,8 @@ class Renderer:
             self._update_camera(draw_state, target, boom)
         self._update_particles(draw_state, boom)
 
-        self.surface.blit(self._sky_surface, (0, 0))
+        self._draw_sky()
+        self._sky_label()                   # 하늘의 강의명(초반 고도에서만)
         self._draw_clouds(front=False)      # 원경 구름 — 배경
         self._ground()
         self._structure(target, grip)
@@ -278,11 +285,12 @@ class Renderer:
         # 효과·객체(충격파 링·파편·화염·연기)를 가린다. 지표선인 착륙 패드만
         # 그 위에 다시 그려 살린다.
         self._ground()
-        self._ground_label()
         self._pad(target)
         if boom > 0.0:
             self._flash(boom)
         self._hud(state)
+        if action_info is not None:
+            self._action_panel(action_info)
 
         if outcome != Outcome.IN_PROGRESS:
             self._banner(outcome)
@@ -383,19 +391,26 @@ class Renderer:
 
     # --- 그리기 ---
 
-    def _build_sky(self) -> pygame.Surface:
-        sky = pygame.Surface((WIDTH, HEIGHT))
-        for row in range(HEIGHT):
-            t = row / HEIGHT
-            if t < 0.55:
-                u = t / 0.55
-                a, b = SKY_TOP, SKY_MID
-            else:
-                u = (t - 0.55) / 0.45
-                a, b = SKY_MID, SKY_BOTTOM
-            color = tuple(int(a[i] + (b[i] - a[i]) * u) for i in range(3))
-            pygame.draw.line(sky, color, (0, row), (WIDTH, row))
-        return sky
+    @staticmethod
+    def _sky_color(world_y: float) -> tuple[int, int, int]:
+        """고도(월드 y)에 따른 하늘 색. 0=지평선 주황, SKY_WORLD_TOP=천정 보라."""
+        t = min(max(world_y / SKY_WORLD_TOP, 0.0), 1.0)
+        if t < 0.55:
+            a, b, u = SKY_BOTTOM, SKY_MID, t / 0.55
+        else:
+            a, b, u = SKY_MID, SKY_TOP, (t - 0.55) / 0.45
+        return tuple(int(a[i] + (b[i] - a[i]) * u) for i in range(3))
+
+    def _draw_sky(self) -> None:
+        """월드 고정 하늘. 각 화면 행의 월드 고도로 색을 정해 그린다 —
+        카메라가 내려가면 노을(낮은 고도)이 위로 차오른다. 2행씩 묶어 그려
+        비용을 줄인다(그라디언트라 눈에 안 띈다)."""
+        cx, cy, scale = self._cam
+        step = 2
+        for py in range(0, HEIGHT, step):
+            world_y = cy + (HEIGHT / 2.0 - py) / scale
+            pygame.draw.rect(self.surface, self._sky_color(world_y),
+                             (0, py, WIDTH, step))
 
     def _build_clouds(self) -> list[dict]:
         """월드 좌표에 고정된 구름. 카메라가 내려가면 스쳐 지나가며
@@ -472,8 +487,8 @@ class Renderer:
                 self.surface, GROUND_COLOR,
                 pygame.Rect(0, ground_top, WIDTH, HEIGHT - ground_top))
 
-    def _build_ground_label(self) -> pygame.Surface:
-        """지면에 새길 강의명(한글) 라벨을 한 번 렌더한다.
+    def _build_sky_label(self) -> pygame.Surface:
+        """하늘에 띄울 강의명(한글) 라벨을 한 번 렌더한다.
 
         한글 폰트가 없는 시스템(일부 Linux/Colab)에서는 두부(□)로 나올 수
         있으나 데모용 장식이라 치명적이지 않다.
@@ -481,22 +496,22 @@ class Renderer:
         font = pygame.font.SysFont(
             "applesdgothicneo,applegothic,arialunicode,notosanscjkkr,nanumgothic",
             48, bold=True)
-        return font.render(GROUND_LABEL_TEXT, True, GROUND_LABEL_COLOR)
+        return font.render(SKY_LABEL_TEXT, True, SKY_LABEL_COLOR)
 
-    def _ground_label(self) -> None:
-        """지면 위에 강의명 라벨을 월드 고정으로 그린다. 지면 오클루더 위에
-        그려야 지면에 새긴 것처럼 보이고, 카메라가 지면을 볼 때만 나타난다."""
+    def _sky_label(self) -> None:
+        """강의명을 하늘 높은 곳에 월드 고정으로 그린다. 로켓이 높은 초반에만
+        화면에 들어오고, 내려갈수록 위로 스쳐 사라진다."""
         if self._cam is None:
             return
         _, _, scale = self._cam
-        target_w = int(GROUND_LABEL_WORLD_W * scale)
-        label = self._ground_label_surf
-        if target_w < 40 or label.get_width() == 0:
-            return   # 너무 멀면(작으면) 생략
+        target_w = int(SKY_LABEL_WORLD_W * scale)
+        label = self._sky_label_surf
+        if target_w < 30 or label.get_width() == 0:
+            return
         target_h = max(4, int(label.get_height() * target_w / label.get_width()))
-        cx, cy = self._to_px(0.0, GROUND_LABEL_Y)
+        cx, cy = self._to_px(0.0, SKY_LABEL_Y)
         if cy < -target_h or cy > HEIGHT + target_h:
-            return   # 지면이 화면 밖이면 생략
+            return   # 화면 밖(이미 지나침)이면 생략
         scaled = pygame.transform.smoothscale(label, (target_w, target_h))
         self.surface.blit(scaled, scaled.get_rect(center=(cx, cy)))
 
@@ -695,8 +710,9 @@ class Renderer:
             # 바람 먼지: 바람 속도로만 흐르고(드래그·중력·페이드 없음),
             # 뷰포트를 벗어나면 반대편으로 감아 하늘을 늘 채운다.
             if p["kind"] == "dust":
-                p["vx"] = state.wind_x
-                p["x"] += p["vx"] * DT
+                # 입자마다 속도 계수가 달라 무리 지어 가장자리를 넘지 않는다 —
+                # 같은 속도면 한꺼번에 감겨 일직선이 된다.
+                p["x"] += state.wind_x * p.get("vf", 1.0) * DT
                 if cam is not None:
                     cx, cy, scale = cam
                     hw = (WIDTH / 2.0) / scale + 6.0
@@ -821,7 +837,10 @@ class Renderer:
             self._particles.append({
                 "x": cx + self._rng.uniform(-hw, hw),
                 "y": self._rng.uniform(y_lo, cy + hh),
-                "vx": wind_x, "vy": 0.0,
+                "vx": 0.0, "vy": 0.0,
+                # 속도 계수(0.7~1.3)로 입자마다 다른 속도 — 무리 지어 감기지
+                # 않아 일직선 줄이 생기지 않는다.
+                "vf": float(self._rng.uniform(0.7, 1.3)),
                 "age": 0.0, "kind": "dust", "life": 1e9,
             })
 
@@ -1008,9 +1027,11 @@ class Renderer:
         self._flame(state)
 
     def _build_livery(self) -> pygame.Surface:
-        """세로로 읽히는 기체 도색. 한 번만 만든다."""
-        font = pygame.font.SysFont("helvetica", 40, bold=True)
-        glyphs = [font.render(ch, True, LIVERY_COLOR) for ch in "YONSEI"]
+        """세로로 읽히는 기체 도색 "YONSEI인이활". 한 번만 만든다.
+        한글이 섞이므로 한글 지원 폰트를 쓴다(없으면 두부, 데모용 장식)."""
+        font = pygame.font.SysFont(
+            "applesdgothicneo,applegothic,arialunicode,helvetica", 34, bold=True)
+        glyphs = [font.render(ch, True, LIVERY_COLOR) for ch in "YONSEI인이활"]
         w = max(g.get_width() for g in glyphs)
         h = sum(g.get_height() for g in glyphs)
         surf = pygame.Surface((w, h), pygame.SRCALPHA)
@@ -1022,7 +1043,7 @@ class Renderer:
 
     def _paint_livery(self, state: State) -> None:
         _, _, scale = self._cam
-        zoom = (ROCKET_HEIGHT * 0.55 * scale) / self._livery.get_height()
+        zoom = (ROCKET_HEIGHT * 0.66 * scale) / self._livery.get_height()
         if zoom <= 0.05:
             return
         # body_to_px가 만드는 노즈 방향(화면 벡터)은 (-sinθ, -cosθ)다.
@@ -1099,13 +1120,64 @@ class Renderer:
             f"wind  {state.wind_x:7.1f} m/s",
             f"step  {state.step:5d} / {self.cfg['max_steps']}",
         ]
-        # 석양 배경은 밝아서 흰 글씨가 묻힌다. 반투명 판을 먼저 깐다.
+        # 석양 배경은 밝아서 흰 글씨가 묻힌다. 반투명 판을 먼저 깐다 —
+        # 배경이 비치도록 옅게(알파 90).
         panel = pygame.Surface((330, 20 + len(lines) * 19), pygame.SRCALPHA)
-        panel.fill((10, 12, 24, 150))
+        panel.fill((10, 12, 24, 90))
         self.surface.blit(panel, (6, 6))
         for i, line in enumerate(lines):
             self.surface.blit(
                 self.font.render(line, True, HUD_COLOR), (12, 12 + i * 19))
+
+    def _action_panel(self, action_info) -> None:
+        """우측 상단에 행동 공간(5 추력 × 3 노즐) 격자를 그려, 정책이 고른
+        행동을 강조한다. values 가 있으면 각 칸을 출력값(Q값/확률)에 비례해
+        밝힌다. 행동 인덱스 = thrust_idx*3 + nozzle_idx."""
+        if isinstance(action_info, dict):
+            chosen = action_info.get("chosen")
+            values = action_info.get("values")
+        else:
+            chosen, values = int(action_info), None
+
+        cell = 26
+        cols, rows = 3, 5           # 노즐 3, 추력 5
+        gx = WIDTH - (cols * cell + 46)
+        gy = 10
+        # 배경 판(옅게)
+        panel = pygame.Surface((cols * cell + 42, rows * cell + 26), pygame.SRCALPHA)
+        panel.fill((10, 12, 24, 90))
+        self.surface.blit(panel, (gx - 6, gy - 4))
+        self.surface.blit(self.font.render("action", True, HUD_COLOR), (gx, gy - 2))
+
+        thrust_lbl = ("0", ".6", "1.0", "1.6", "2.5")   # G
+        noz_lbl = ("<", "|", ">")        # 노즐 좌/중립/우
+        vmax = max(values) if values else None
+        vmin = min(values) if values else None
+        top = gy + 18
+        for tr in range(rows):
+            # 추력 라벨(왼쪽). 표에서는 위가 큰 추력이 되도록 뒤집어 그린다.
+            ti = rows - 1 - tr
+            self.surface.blit(self.font.render(thrust_lbl[ti], True, HUD_COLOR),
+                              (gx - 4, top + tr * cell + 4))
+            for nz in range(cols):
+                a = ti * cols + nz
+                x = gx + 30 + nz * cell
+                y = top + tr * cell
+                rect = pygame.Rect(x, y, cell - 3, cell - 3)
+                # 칸 채우기: 값이 있으면 정규화한 밝기, 없으면 어둑한 기본색
+                if values is not None and vmax > vmin:
+                    u = (values[a] - vmin) / (vmax - vmin)
+                    fill = (int(40 + 150 * u), int(60 + 120 * u), int(70 + 40 * u))
+                else:
+                    fill = (48, 54, 66)
+                pygame.draw.rect(self.surface, fill, rect)
+                if a == chosen:
+                    pygame.draw.rect(self.surface, (255, 210, 90), rect, 3)
+        # 노즐 라벨(하단)
+        for nz in range(cols):
+            self.surface.blit(
+                self.font.render(noz_lbl[nz], True, HUD_COLOR),
+                (gx + 34 + nz * cell, top + rows * cell + 1))
 
     def _banner(self, outcome: str) -> None:
         text, color = BANNER_TEXT[outcome]

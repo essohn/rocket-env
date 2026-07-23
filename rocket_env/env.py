@@ -58,6 +58,7 @@ class RocketEnv(gym.Env):
         self._potential = 0.0
         self._initial_potential = 0.0
         self._outcome = Outcome.IN_PROGRESS
+        self._last_action = None
 
     # --- Gymnasium API ---
 
@@ -75,6 +76,7 @@ class RocketEnv(gym.Env):
         # 종료 시 되돌려주어 shaping 총합을 정확히 0으로 만든다.
         self._initial_potential = self._potential
         self._outcome = Outcome.IN_PROGRESS
+        self._last_action = None
 
         if self._renderer is not None:
             self._renderer.reset()
@@ -82,6 +84,7 @@ class RocketEnv(gym.Env):
         return self._observation(), self._info(impact_speed=None)
 
     def step(self, action):
+        self._last_action = int(action)   # 렌더러 행동 시각화용
         thrust, nozzle_rate = ACTION_TABLE[int(action)]
 
         # 연료가 바닥나면 엔진이 꺼진다.
@@ -143,7 +146,7 @@ class RocketEnv(gym.Env):
         grip = 1.0 if (self.cfg["task"] == "catch"
                        and self._outcome == Outcome.SUCCESS) else 0.0
         return self._renderer.draw(self.state, self._target, self._outcome,
-                                   grip=grip)
+                                   grip=grip, action_info=self._last_action)
 
     def close(self):
         if self._renderer is not None:
