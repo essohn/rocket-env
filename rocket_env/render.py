@@ -130,7 +130,6 @@ PAD_COLOR = (200, 190, 90)
 TOWER_COLOR = (96, 99, 106)       # 몸통(마스트) — 중간 밝기
 JAW_COLOR = (132, 136, 144)       # 앞쪽 팔(팔1) — 앞이라 밝게
 JAW_BACK_COLOR = (66, 68, 74)     # 뒤쪽 팔(팔2) — 그늘져 어둡게
-ARM_COLOR = (230, 120, 60)        # 포획 판정 범위 표시선(구조물 아님)
 JAW_CLOSED_HALF = 5.0     # 다 물었을 때 턱 안쪽 간격 (m)
 # 카메라가 약간 위에서 내려다본다고 가정한다. 뒤쪽 팔은 화면에서 위로,
 # 앞쪽 팔은 아래로 어긋나게 그려 둘이 구분되고, 로켓이 그 사이에 물린다.
@@ -559,31 +558,17 @@ class Renderer:
             self._pad(target)
             return
 
-        x_tower, y_arm, arm_half, window_half = self._catch_geometry(target)
+        x_tower, y_arm, _, window_half = self._catch_geometry(target)
         # 마스트는 포획 지점 정중앙이 아니라 왼쪽으로 물러난 자리에 선다 —
         # 그래야 로켓이 타워 "위"가 아니라 "옆"에 잡힌 것처럼 보인다.
         mast_x = x_tower - TOWER_OFFSET
         mast_top = y_arm * TOWER_HEIGHT_FACTOR
 
-        # 가로보는 그리지 않는다. 젓가락 자체가 마스트에서 뻗어 나오므로
-        # 뒤에 수평 트러스를 하나 더 두면 의미 없이 겹쳐 보인다.
-        self._truss_mast(mast_x, mast_top)
-
-        # 실제 포획 판정 범위(±zone_r). 이걸 따로 그리지 않으면 학생은
-        # 팔 안쪽으로 잘 지나간 것처럼 보이는데 MISSED 가 뜨는 이유를
-        # 알 수 없다. 디버깅하라고 만든 그림이 디버깅을 방해하게 된다.
-        # 실제 포획 판정 범위(±zone_r)를 얇게 표시한다. 구조물처럼 굵게
-        # 그리면 젓가락과 헷갈리지만, 아예 지우면 학생이 "팔 안쪽으로
-        # 지나간 것 같은데 왜 MISSED 인지"를 알 수 없다.
-        pygame.draw.line(self.surface, ARM_COLOR,
-                         self._to_px(x_tower - window_half, y_arm),
-                         self._to_px(x_tower + window_half, y_arm),
-                         self._scaled_width(2.5, min_px=1))
-
-        # 뒤쪽 팔만 여기서 그린다. 앞쪽 팔은 로켓을 그린 뒤에 덧그려야
-        # 로켓이 두 팔 사이에 물린 것처럼 보인다 — 한 겹으로 그리면
-        # 팔이 기체를 관통한 모습이 된다.
+        # 뒤쪽(위) 팔을 마스트보다 먼저 그려 몸통 뒤에 오게 한다. 앞쪽 팔은
+        # 로켓을 그린 뒤(_front_arm)에 덧그려 기체 앞에 온다 — 그래야 로켓이
+        # 두 팔 사이에 물린 것처럼 보인다. z 순서: 뒤팔 → 몸통 → 로켓 → 앞팔.
         self._draw_jaws(x_tower, y_arm, window_half, grip, front=False)
+        self._truss_mast(mast_x, mast_top)
 
     def _truss_mast(self, mast_x: float, top: float) -> None:
         """수직 트러스. 기둥 하나로 그리면 깃대처럼 보이고, 실제 발사탑은
