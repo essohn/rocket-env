@@ -73,6 +73,9 @@
 <script>
 "use strict";
 const MONO="ui-monospace,Menlo,Consolas,monospace";
+// 한글 지원 폰트 스택(시스템별). monospace 엔 한글 글리프가 없어 별명·라벨이
+// 깨지므로 한글 텍스트엔 이걸 쓴다. CSP 가 웹폰트 CDN 을 막아 시스템 폰트만 쓴다.
+const KFONT="'Apple SD Gothic Neo','Malgun Gothic','Noto Sans KR','Noto Sans CJK KR','AppleGothic','Nanum Gothic',sans-serif";
 // ── 물리 상수 (physics.py 와 동일) ──────────────────────────────
 const G=9.8, DT=0.05, H=50, I=H*H/12, PHI_MAX=8*Math.PI/180;
 const VT=250, RHO=G/VT;
@@ -233,9 +236,9 @@ function drawSkyLabel(){
   const[x,y]=to(0,820);const sc=cam[2];const fs=Math.round(30*sc);
   if(fs<7||y<-60||y>Hh+60)return;
   ctx.save();ctx.textAlign="center";ctx.fillStyle="rgba(240,226,214,.92)";
-  ctx.font=`700 ${fs}px ${MONO}`;
+  ctx.font=`700 ${fs}px ${KFONT}`;
   ctx.fillText("인공지능의 이해와 활용",x,y);
-  ctx.font=`700 ${Math.round(fs*.85)}px ${MONO}`;
+  ctx.font=`700 ${Math.round(fs*.85)}px ${KFONT}`;
   ctx.fillText("2026-2",x,y+fs*1.05);
   ctx.fillText("Rocket Competition",x,y+fs*2.35);
   ctx.restore();
@@ -256,7 +259,7 @@ function drawRocket(){
   const sc=cam[2], gh=H*.088*sc;
   if(gh>=6){ctx.save();const[ox,oy]=bodyTo(0,2);
     ctx.translate(ox,oy);ctx.rotate(-S.theta);ctx.textAlign="center";ctx.textBaseline="middle";
-    ctx.fillStyle="#28387a";ctx.font=`700 ${Math.round(gh*.95)}px ${MONO}`;
+    ctx.fillStyle="#28387a";ctx.font=`700 ${Math.round(gh*.95)}px ${KFONT}`;
     const n=txt.length;for(let i=0;i<n;i++)ctx.fillText(txt[i],0,(i-(n-1)/2)*gh);
     ctx.restore();}
 }
@@ -336,14 +339,24 @@ function drawBanner(){
 
 // ── 루프 ────────────────────────────────────────────────────────
 let trail=[];
-function tick(){
+// 고정 시간간격: 물리는 실제 시간 기준 20Hz(=DT 0.05s)로만 나아간다. 화면
+// 주사율(60/120/144Hz)과 무관하게 어떤 컴퓨터에서도 같은 속도로 흐른다.
+const STEP_MS=DT*1000;
+let lastT=0, acc=0;
+function fixedStep(){
   if(!outcome){ step(); trail.push([S.x,S.y]); if(trail.length>400)trail.shift(); }
   else if(boom>0){ boom=Math.min(1,boom+1/40); }
   updateParticles();
   const tgt=camTarget();
   if(!cam)cam=tgt; else{const k=(boom>0)?Math.min(.35,.12+.2*boom):.12;
     cam=[cam[0]+(tgt[0]-cam[0])*k, cam[1]+(tgt[1]-cam[1])*k, cam[2]+(tgt[2]-cam[2])*k];}
-  draw();
+}
+function tick(now){
+  if(!lastT)lastT=now;
+  acc+=now-lastT; lastT=now;
+  acc=Math.min(acc,250);           // 탭 전환 등으로 크게 밀렸을 때 폭주 방지
+  while(acc>=STEP_MS){ fixedStep(); acc-=STEP_MS; }
+  if(cam)draw();                    // 렌더는 매 프레임(부드럽게)
   requestAnimationFrame(tick);
 }
 
@@ -368,5 +381,5 @@ const sel=document.getElementById("round");
 for(const k of Object.keys(ROUNDS)){const o=document.createElement("option");o.value=k;o.textContent=LABEL[k];sel.appendChild(o);}
 sel.addEventListener("change",()=>{roundKey=sel.value;trail=[];reset();});
 roundKey="landing-basic"; sel.value=roundKey;
-reset(); tick();
+reset(); requestAnimationFrame(tick);
 </script>
