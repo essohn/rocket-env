@@ -1,10 +1,11 @@
+<meta charset="utf-8">
 <title>로켓 착륙 — 수동 조종</title>
 <style>
   :root{
     --bg:#0a0b12; --ink:#e7ecf6; --dim:#878da0;
     --panel:rgba(12,14,26,.55); --line:rgba(150,160,190,.16);
     --amber:#ffca5c; --green:#46c35a; --red:#de463a;
-    --mono:ui-monospace,SFMono-Regular,Menlo,"DejaVu Sans Mono",Consolas,monospace;
+    --mono:ui-monospace,SFMono-Regular,Menlo,"DejaVu Sans Mono",Consolas,"Apple SD Gothic Neo","Malgun Gothic","Noto Sans KR",monospace;
   }
   *{box-sizing:border-box}
   html,body{margin:0;height:100%}
@@ -109,7 +110,7 @@ function skyColor(y){
 // ── 상태 / 리셋 ─────────────────────────────────────────────────
 const cvs=document.getElementById("c"), ctx=cvs.getContext("2d");
 const W=cvs.width, Hh=cvs.height;
-let S, cam, particles, thrust, outcome, boom, frames, roundKey, rng;
+let S, cam, particles, thrust, outcome, boom, boomI, frames, roundKey, rng;
 let held={left:false,right:false};
 
 function rand(a,b){return a+Math.random()*(b-a);}
@@ -119,7 +120,7 @@ function reset(){
   S={x:rand(-r.x,r.x), y:r.y, vx:0, vy:r.vy,
      theta:rand(-r.th,r.th)*Math.PI/180, omega:osgn*rand(r.om[0],r.om[1])*Math.PI/180,
      phi:0, fuel:r.fuel, wind:r.wind?(r.gust?0:r.wind):0, step:0};
-  cam=null; particles=[]; thrust=0; outcome=null; boom=0; frames=0;
+  cam=null; particles=[]; thrust=0; outcome=null; boom=0; boomI=1; frames=0;
   document.getElementById("phys").textContent=
     `${LABEL[roundKey]} · 접지 <${r.vmax} m/s · 존 ±${r.zone} m`;
 }
@@ -150,7 +151,7 @@ function step(){
     const spd=Math.hypot(s.vx,s.vy), tilt=Math.abs(wrap(s.theta)), om=Math.abs(s.omega);
     const ok = spd<r.vmax && tilt<10*Math.PI/180 && om<10*Math.PI/180 && Math.abs(s.x)<r.zone;
     outcome=ok?"LANDED":"CRASHED"; s.y=GROUND;
-    if(!ok && spd>22){ boom=1e-6; explode(); }
+    if(!ok){ boom=1e-6; explode(spd); }   // 크래시는 속도에 비례해 항상 폭발
   } else if(s.fuel!==null && s.fuel<=0 && th===0 && s.vy<-r.vmax){
     // 연료 소진 후에도 계속 판정은 접지에서
   } else if(s.step>=MAX_STEPS){ outcome="OUT OF TIME"; }
@@ -171,13 +172,17 @@ function emit(th){
     particles.push({x:px,y:py,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,age:0,life:1.6,k:"s"});
   }
 }
-function explode(){
-  const ix=S.x, iy=Math.max(2,S.y-H/2);
-  for(let i=0;i<90;i++){const a=rand(0,7),s=rand(20,160);
+// 폭발 세기는 접지 속도에 비례한다. 살짝 넘어진 저속 크래시도 눈에 보이는
+// 파열은 나되(0.45배 하한), 고속 충돌은 큰 화구가 된다(1.2배 상한).
+function explode(spd){
+  boomI=Math.min(1.2,Math.max(.45,(spd||30)/42));
+  const F=n=>Math.max(6,Math.round(n*boomI));
+  const ix=S.x, iy=Math.max(2,S.y-H/2), vs=.6+.4*boomI;
+  for(let i=0;i<F(90);i++){const a=rand(0,7),s=rand(20,160)*vs;
     particles.push({x:ix,y:iy+2,vx:Math.cos(a)*s,vy:Math.abs(Math.sin(a)*s),age:0,life:rand(.3,.7),k:"f"});}
-  for(let i=0;i<110;i++){const a=rand(0,7),s=rand(130,360);
+  for(let i=0;i<F(110);i++){const a=rand(0,7),s=rand(130,360)*vs;
     particles.push({x:ix,y:iy,vx:Math.cos(a)*s,vy:Math.sin(a)*s,age:0,life:rand(.5,1.1),k:"d"});}
-  for(let i=0;i<80;i++){const big=Math.random()<.5;
+  for(let i=0;i<F(80);i++){const big=Math.random()<.5;
     particles.push({x:ix+rand(-6,6),y:iy+rand(0,10),vx:rand(-40,40),vy:rand(20,90)+20,
       y0:iy,bill:rand(-1,1),sm:big?rand(1.5,2.2):rand(.45,.7),am:big?rand(.35,.6):rand(1.15,1.6),
       age:0,life:rand(4,7.5),k:"bs"});}
@@ -290,7 +295,7 @@ function drawParticles(sc){
     else{const rd=Math.max(1,1.5*sc);ctx.fillStyle=`rgba(250,226,190,${.95*(1-f)})`;circle(x,y,rd);}
   }
 }
-function drawFlash(){const a=Math.max(0,235*(1-boom*14))/255;if(a<=0)return;
+function drawFlash(){const a=Math.max(0,235*boomI*(1-boom*14))/255;if(a<=0)return;
   ctx.fillStyle=`rgba(255,246,226,${a})`;ctx.fillRect(0,0,W,Hh);
   // 충격파 링
   if(boom<.09){const t=boom/.09,[cx2,cy2]=to(S.x,Math.max(0,S.y-H/2));
