@@ -30,6 +30,12 @@ MIN_SCALE = WIDTH / (WORLD_X_MAX - WORLD_X_MIN)   # 세계 전체 폭이 보이�
 MAX_SCALE = 14.0                                   # 최대 줌
 CAMERA_SMOOTHING = 0.12                            # 0에 가까울수록 부드럽다(느리다)
 
+# 선 굵기의 기준 배율. 세계 폭에 의존하는 MIN_SCALE을 쓰면 월드 박스를
+# 넓히는 순간 모든 선이 그 비율만큼 굵어져 트러스 부재가 서로 붙어
+# 통짜 판때기가 되어버린다 (실제로 ±300 -> ±900 으로 넓히며 3배가 됐다).
+# 그림 두께는 세계 크기가 아니라 로켓 크기에 대해 일정해야 한다.
+WIDTH_REF_SCALE = 640.0 / 600.0
+
 # --- 연기 입자 ---
 MAX_PARTICLES = 700
 PARTICLE_LIFE = 1.2          # 초 — 연기
@@ -497,13 +503,12 @@ class Renderer:
     def _scaled_width(self, base_px: float, min_px: int = 2) -> int:
         """카메라 배율에 맞춰 선 굵기를 조정한다.
 
-        MIN_SCALE(세계 전체가 보이는 최소 배율)에서 base_px로 보이도록
-        맞춘 값이라, 줌인할수록 그만큼 굵어져야 로켓 크기 대비 두께가
-        일정하게 유지된다. 줌인 폭이 커진 지금은 고정 px로는 하이라인이
-        되어버려서 최소값으로 하한을 둔다.
+        WIDTH_REF_SCALE에서 base_px로 보이도록 맞춘 값이라, 줌인할수록
+        그만큼 굵어져야 로켓 크기 대비 두께가 일정하게 유지된다. 줌인 폭이
+        커진 지금은 고정 px로는 헤어라인이 되어버려서 최소값으로 하한을 둔다.
         """
         _, _, scale = self._cam
-        return max(min_px, int(round(base_px * scale / MIN_SCALE)))
+        return max(min_px, int(round(base_px * scale / WIDTH_REF_SCALE)))
 
     def _approach_grip(self, state: State, target: tuple[float, float]) -> float:
         """로켓이 팔에 다가온 정도(0~1). 집게가 오므라드는 양이다.

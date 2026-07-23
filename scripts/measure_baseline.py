@@ -44,6 +44,8 @@ def main() -> None:
     parser.add_argument("--preset", default="landing-basic", choices=list(PRESETS))
     parser.add_argument("--steps", type=int, default=100_000)
     parser.add_argument("--lr", type=float, default=6e-4)
+    parser.add_argument("--gamma", type=float, default=0.99,
+                        help="DQN 할인율. 에피소드가 길어지면 키워야 한다")
     parser.add_argument(
         "--seeds", type=int, default=3,
         help="독립적인 학습 실행 횟수 — 학습 시드에 따른 편차를 재기 위함")
@@ -62,7 +64,7 @@ def main() -> None:
     dqn_rates: list[float] = []
     for train_seed in range(args.seeds):
         model = DQN("MlpPolicy", env, verbose=0, device="cpu",
-                    learning_rate=args.lr, buffer_size=200_000,
+                    learning_rate=args.lr, gamma=args.gamma, buffer_size=200_000,
                     learning_starts=5_000, policy_kwargs={"net_arch": [256, 256]},
                     seed=train_seed)
         model.learn(total_timesteps=args.steps)
