@@ -44,9 +44,11 @@ env = gym.make("rocket-v0", config=PRESETS["catch"])
 ```
 
 `landing-basic`, `landing-attitude`, `landing-descent`, `landing-wind`,
-`landing-gust`, `catch`. landing 다섯 라운드는 난이도 축을 하나씩만
-추가한다. `catch`는 이 규칙 밖이다 — gust를 빼고 바람을 줄이는 대신
-성공 임계값 넷(속도·위치·자세·각속도)을 모두 조이는 다른 과제다.
+`landing-gust`, `catch`. 난이도 축을 하나씩만 더해 올라간다. 초반은 낮은
+고도라 기본 DQN 으로 학습되고, 후반은 높은 고도라 더 강한 셋업(PPO+정규화)이
+필요하다 — 아래 "학습 — 알고리즘 선택" 참고. `catch`는 이 규칙 밖이다:
+지면 대신 발사탑 젓가락 높이를 통과해야 하고 성공 임계값 넷(속도·위치·
+자세·각속도)을 모두 조인다.
 
 ## 관찰과 행동
 
@@ -54,29 +56,51 @@ env = gym.make("rocket-v0", config=PRESETS["catch"])
 
 | # | 성분 | # | 성분 |
 |---|------|---|------|
-| 0 | `dx / 300` | 6 | `omega / (pi/2)` |
-| 1 | `dy / 300` | 7 | `phi / 20deg` |
-| 2 | `vx / 50` | 8 | `fuel_frac` |
-| 3 | `vy / 50` | 9 | `wind_x / 20` |
+| 0 | `dx / 900` | 6 | `omega / (pi/2)` |
+| 1 | `dy / 900` | 7 | `phi / 8deg` |
+| 2 | `vx / 200` | 8 | `fuel_frac` |
+| 3 | `vy / 200` | 9 | `wind_x / 20` |
 | 4 | `sin(theta)` | 10 | `step / max_steps` |
 | 5 | `cos(theta)` | | |
 
-행동은 `Discrete(12)` — 추력 `{0, 0.2g, 1.0g, 2.0g}` × 노즐 각속도 `{-120, 0, +120} deg/s`.
-인덱스는 `thrust_idx * 3 + nozzle_idx`.
+행동은 `Discrete(15)` — 추력 `{0, 0.6g, 1.0g, 1.6g, 2.5g}` × 노즐 각속도
+`{-120, 0, +120} deg/s`. 인덱스는 `thrust_idx * 3 + nozzle_idx`. 최대 추력이
+중량의 2.5배(순감속 1.5g)라, 실제 착륙 로켓처럼 무겁게 내려와 낙하 구간
+전체에 걸쳐 아슬아슬하게 감속한다.
 
 ## 보상
 
 - 스텝: 잠재함수 기반 shaping(PBRS) + 연료 패널티. `shaping_gamma=1.0`이라 총합이
   정확히 `Φ(s_T) - Φ(s_0)`로 접혀 에피소드 길이가 점수에 영향을 주지 않는다.
-- 성공: 기본점 100 + 접촉 속도 / 위치 정밀도 / 자세 / 잔여 연료 / 시간 효율 보너스 (최대 250).
-- 실패(CRASH/MISSED/OUT_OF_FUEL): 성공 판정에 쓰는 다섯 조건(위치·속도·자세·
-  각속도) 각각에 대한 근접도 중 가장 나쁜 것으로 채점한다 (0–40). 시간 항이
-  없으므로 조기 종료가 이득이 되지 않는다.
+- 성공/실패는 경계에서 **연속**이다. 실패(CRASH/MISSED/OUT_OF_FUEL)는 성공
+  판정 조건(위치·속도·자세·각속도)에 대한 도달도 중 가장 나쁜 것으로 0–40점.
+  각 축이 임계값에 닿으면 40점에 이른다. 성공은 그 40점을 바닥으로, **접지
+  속도가 낮을수록**(가장 중요한 축) 그리고 위치·연료가 좋을수록 최대 220점까지
+  이어진다. 경계에 점프가 없어 학습이 성공을 향해 매끄럽게 나아간다.
 - 실패(TIMEOUT): 항상 0점이다. 판정 지점에 가지 않고 시간이 다 되도록
   맴돌기만 하면 시도 자체를 하지 않은 것으로 본다.
 
 `config["reward"]`의 가중치는 전부 조정 가능하다. 학습용 보상을 자유롭게 설계하되,
 채점은 서버가 정한 평가 설정으로 이뤄진다.
+
+## 학습 — 알고리즘 선택
+
+라운드마다 필요한 알고리즘의 급이 다르다. `scripts/train.py`가 두 셋업을 모두
+제공한다.
+
+```bash
+uv run python scripts/train.py --preset landing-basic --algo dqn --steps 400000
+uv run python scripts/train.py --preset landing-gust  --algo ppo --steps 1500000
+```
+
+- **`--algo dqn`** — 기본 DQN. 초반 라운드(`landing-basic`, `landing-attitude`)를
+  학습한다. 낮은 고도의 짧은 낙하에 충분하다.
+- **`--algo ppo`** — PPO + 관측/보상 정규화(VecNormalize). 후반 고고도 라운드는
+  낙하 구간이 길어 바닐라 DQN 의 신용 할당이 무너지지만(1M 스텝에도 발산),
+  이 셋업은 학습해낸다. 실측: 고고도 라운드에서 DQN 0% vs PPO+정규화 ~40%.
+
+즉 알고리즘을 넘어설수록 더 높은 라운드를 통과할 수 있다. 라운드별 측정치는
+[docs/baselines.md](docs/baselines.md) 참고.
 
 ## 개발
 
