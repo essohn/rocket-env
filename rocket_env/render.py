@@ -234,7 +234,7 @@ class Renderer:
     def draw(self, state: State, target: tuple[float, float],
              outcome: str, grip: float | None = None, settle: float = 0.0,
              boom: float = 0.0, hold_camera: bool = False,
-             action_info=None):
+             action_info=None, retry_hint: bool = False):
         """한 프레임을 그린다.
 
         `action_info`(선택)는 우측 상단 행동 시각화에 쓴다. 정수(선택된 행동
@@ -309,6 +309,8 @@ class Renderer:
 
         if outcome != Outcome.IN_PROGRESS:
             self._banner(outcome)
+        if retry_hint:
+            self._retry_hint()
 
         if self.render_mode == "human":
             pygame.event.pump()
@@ -1263,3 +1265,15 @@ class Renderer:
         surface = self.banner_font.render(text, True, color)
         rect = surface.get_rect(center=(WIDTH // 2, HEIGHT // 3))
         self.surface.blit(surface, rect)
+
+    def _retry_hint(self) -> None:
+        """수동 모드에서 에피소드가 끝났을 때 재시작 안내. 배너 아래에 그린다."""
+        surface = self.font.render("Press R to retry", True, (240, 240, 250))
+        # 어두운 판을 깔아 배경과 대비시킨다.
+        pad = 8
+        panel = pygame.Surface((surface.get_width() + pad * 2,
+                                surface.get_height() + pad), pygame.SRCALPHA)
+        panel.fill((10, 12, 24, 150))
+        cx, cy = WIDTH // 2, HEIGHT // 3 + 40
+        self.surface.blit(panel, panel.get_rect(center=(cx, cy)))
+        self.surface.blit(surface, surface.get_rect(center=(cx, cy)))

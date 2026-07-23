@@ -87,14 +87,15 @@ def main() -> None:
                         and (info["impact_speed"] or 0.0) > EXPLODE_SPEED):
                     boom_t = 1e-6   # 다음 프레임부터 폭발 연출 시작
 
-        if boom_t > 0.0:
-            # 충돌 상태를 고정한 채 폭발 연출을 0→1 로 그린다. env.render 대신
-            # 렌더러를 직접 불러 boom 을 넘긴다(env.render 는 boom=0 이라 기체가
-            # 멀쩡히 다시 그려진다).
-            boom_t = min(1.0, boom_t + 1.0 / BOOM_FRAMES)
+        if done:
+            # 종료: 재시작 안내를 띄우고, 빠른 충돌이면 폭발 연출(boom 0→1)을
+            # 이어 그린다. env.render 는 boom=0·안내 없음이라 렌더러를 직접
+            # 부른다.
+            if boom_t > 0.0:
+                boom_t = min(1.0, boom_t + 1.0 / BOOM_FRAMES)
             unwrapped._renderer.draw(
                 unwrapped.state, unwrapped._target, unwrapped._outcome,
-                boom=boom_t)
+                boom=boom_t, retry_hint=True)
         else:
             env.render()   # human 모드는 내부에서 20Hz 로 페이싱한다
 
