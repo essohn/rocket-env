@@ -104,20 +104,27 @@ TOWER_HEIGHT_FACTOR = 1.3
 
 # 석양. 천정의 짙은 보라에서 지평선의 주황까지 3단으로 섞는다 —
 # 2단으로는 노을 특유의 붉은 중간대가 나오지 않는다.
-SKY_TOP = (28, 26, 66)
-SKY_MID = (188, 88, 84)
-SKY_BOTTOM = (255, 178, 98)
-# 하늘은 월드 좌표(고도)에 고정된다. 지면(y=0)이 지평선 주황, 이 고도에서
-# 천정의 짙은 보라. 카메라가 화면 고정이 아니라 고도에 따라 색이 정해져,
-# 내려갈수록 노을이 차오른다.
-SKY_WORLD_TOP = 1400.0
+# 하늘은 월드 좌표(고도)에 고정된다. 고도에 따라 색이 정해져 내려갈수록
+# 노을이 차오른다. 4스톱: 지평선의 은은한 주황 → 보라빛 붉은 → 보라/파랑 →
+# 천정의 검정. 아래를 순주황이 아니라 중간톤으로 낮춰 로켓·먼지가 잘 보인다.
+# (t: 0=지면, 1=천정)
+SKY_STOPS = (
+    (0.00, (206, 132, 96)),    # 지평선 — 은은한 주황
+    (0.30, (150, 80, 104)),    # 보라빛 붉은
+    (0.58, (52, 50, 110)),     # 보라/파랑
+    (0.82, (6, 6, 14)),        # 천정 — 검정
+    (1.00, (6, 6, 14)),        # 그 위도 검정 유지
+)
+# 검정에 이르는 고도. 낮게 잡아 대부분의 고고도 라운드가 하늘 꼭대기에서
+# 검정을 보게 한다.
+SKY_WORLD_TOP = 1050.0
 GROUND_COLOR = (38, 40, 44)
 # 강의명을 하늘 높은 곳(월드 고정)에 띄운다. 로켓이 높은 초반에만 보이고,
 # 내려갈수록 위로 스쳐 사라진다.
-SKY_LABEL_TEXT = "인공지능의 이해와 활용 2026-2"
+# 라벨 문구는 _build_sky_label 에서 3줄로 직접 구성한다.
 SKY_LABEL_COLOR = (240, 226, 214)     # 노을 하늘에 밝게
 SKY_LABEL_WORLD_W = 260.0             # 하늘에서 차지하는 폭 (m)
-SKY_LABEL_Y = 1050.0                  # 고고도 — 초반 낙하 구간
+SKY_LABEL_Y = 820.0                   # 고고도 — 초반 낙하 구간(보라 하늘)
 PAD_COLOR = (200, 190, 90)
 TOWER_COLOR = (150, 155, 165)
 ARM_COLOR = (230, 120, 60)
@@ -393,13 +400,14 @@ class Renderer:
 
     @staticmethod
     def _sky_color(world_y: float) -> tuple[int, int, int]:
-        """고도(월드 y)에 따른 하늘 색. 0=지평선 주황, SKY_WORLD_TOP=천정 보라."""
+        """고도(월드 y)에 따른 하늘 색. SKY_STOPS 를 선형 보간한다.
+        0=지평선 주황, SKY_WORLD_TOP=천정 검정."""
         t = min(max(world_y / SKY_WORLD_TOP, 0.0), 1.0)
-        if t < 0.55:
-            a, b, u = SKY_BOTTOM, SKY_MID, t / 0.55
-        else:
-            a, b, u = SKY_MID, SKY_TOP, (t - 0.55) / 0.45
-        return tuple(int(a[i] + (b[i] - a[i]) * u) for i in range(3))
+        for (t0, c0), (t1, c1) in zip(SKY_STOPS, SKY_STOPS[1:]):
+            if t <= t1:
+                u = (t - t0) / (t1 - t0) if t1 > t0 else 0.0
+                return tuple(int(c0[i] + (c1[i] - c0[i]) * u) for i in range(3))
+        return SKY_STOPS[-1][1]
 
     def _draw_sky(self) -> None:
         """월드 고정 하늘. 각 화면 행의 월드 고도로 색을 정해 그린다 —
@@ -488,15 +496,31 @@ class Renderer:
                 pygame.Rect(0, ground_top, WIDTH, HEIGHT - ground_top))
 
     def _build_sky_label(self) -> pygame.Surface:
-        """하늘에 띄울 강의명(한글) 라벨을 한 번 렌더한다.
+        """하늘에 띄울 강의명 라벨(3줄)을 한 번 렌더한다.
 
-        한글 폰트가 없는 시스템(일부 Linux/Colab)에서는 두부(□)로 나올 수
-        있으나 데모용 장식이라 치명적이지 않다.
+        인공지능의 이해와 활용 / 2026-2 / (간격) Rocket Competition.
+        한글 폰트가 없는 시스템에서는 두부(□)로 나올 수 있으나 데모용 장식이다.
         """
-        font = pygame.font.SysFont(
-            "applesdgothicneo,applegothic,arialunicode,notosanscjkkr,nanumgothic",
-            48, bold=True)
-        return font.render(SKY_LABEL_TEXT, True, SKY_LABEL_COLOR)
+        fam = "applesdgothicneo,applegothic,arialunicode,notosanscjkkr,nanumgothic"
+        big = pygame.font.SysFont(fam, 52, bold=True)
+        mid = pygame.font.SysFont(fam, 44, bold=True)
+        # (텍스트, 폰트, 위쪽 여백 px)
+        lines = [
+            ("인공지능의 이해와 활용", big, 0),
+            ("2026-2", mid, 6),
+            ("Rocket Competition", mid, 34),   # 조금 더 내려서
+        ]
+        glyphs = [(f.render(text, True, SKY_LABEL_COLOR), gap)
+                  for text, f, gap in lines]
+        w = max(g.get_width() for g, _ in glyphs)
+        h = sum(g.get_height() + gap for g, gap in glyphs)
+        surf = pygame.Surface((w, h), pygame.SRCALPHA)
+        y = 0
+        for g, gap in glyphs:
+            y += gap
+            surf.blit(g, ((w - g.get_width()) // 2, y))
+            y += g.get_height()
+        return surf
 
     def _sky_label(self) -> None:
         """강의명을 하늘 높은 곳에 월드 고정으로 그린다. 로켓이 높은 초반에만
