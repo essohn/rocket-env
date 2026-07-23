@@ -108,6 +108,12 @@ SKY_TOP = (28, 26, 66)
 SKY_MID = (188, 88, 84)
 SKY_BOTTOM = (255, 178, 98)
 GROUND_COLOR = (38, 40, 44)
+GROUND_LABEL_TEXT = "인공지능의 이해와 활용 2026-2"
+GROUND_LABEL_COLOR = (120, 122, 96)   # 어두운 지면에 새긴 듯 은은하게
+# 착륙 줌인(배율 ~5.8)에서도 전체 문구가 화면(640px) 안에 들어오도록 폭을
+# 잡는다. 640/5.8 ≈ 110 m.
+GROUND_LABEL_WORLD_W = 110.0          # 지면에서 차지하는 폭 (m)
+GROUND_LABEL_Y = -22.0                # 지표 아래(지면 위에 새긴 위치)
 PAD_COLOR = (200, 190, 90)
 TOWER_COLOR = (150, 155, 165)
 ARM_COLOR = (230, 120, 60)
@@ -179,6 +185,7 @@ class Renderer:
         self._particles: list[dict] = []
         self._boomed = False
         self._boom_center = (0.0, 0.0)   # 폭심지 — 충격파·연기 기둥의 원점
+        self._prev_thrust = 0.0          # 점화(0→>0) 감지용
         self._rng = np.random.default_rng()
 
         if render_mode == "human":
@@ -197,6 +204,8 @@ class Renderer:
         # 구름도 고정 시드로 한 번 만들어 재사용한다 — 매 에피소드, 매
         # 렌더러 인스턴스에서 같은 하늘이 보여야 한다(재현성).
         self._clouds = self._build_clouds()
+        # 지면에 새겨진 강의명 라벨(한글). 한 번 렌더해 캐시한다.
+        self._ground_label_surf = self._build_ground_label()
 
     # --- 공개 API ---
 
@@ -206,6 +215,7 @@ class Renderer:
         self._particles = []
         self._boomed = False
         self._boom_center = (0.0, 0.0)
+        self._prev_thrust = 0.0
 
     def draw(self, state: State, target: tuple[float, float],
              outcome: str, grip: float | None = None, settle: float = 0.0,
@@ -268,6 +278,7 @@ class Renderer:
         # 효과·객체(충격파 링·파편·화염·연기)를 가린다. 지표선인 착륙 패드만
         # 그 위에 다시 그려 살린다.
         self._ground()
+        self._ground_label()
         self._pad(target)
         if boom > 0.0:
             self._flash(boom)
@@ -460,6 +471,34 @@ class Renderer:
             pygame.draw.rect(
                 self.surface, GROUND_COLOR,
                 pygame.Rect(0, ground_top, WIDTH, HEIGHT - ground_top))
+
+    def _build_ground_label(self) -> pygame.Surface:
+        """지면에 새길 강의명(한글) 라벨을 한 번 렌더한다.
+
+        한글 폰트가 없는 시스템(일부 Linux/Colab)에서는 두부(□)로 나올 수
+        있으나 데모용 장식이라 치명적이지 않다.
+        """
+        font = pygame.font.SysFont(
+            "applesdgothicneo,applegothic,arialunicode,notosanscjkkr,nanumgothic",
+            48, bold=True)
+        return font.render(GROUND_LABEL_TEXT, True, GROUND_LABEL_COLOR)
+
+    def _ground_label(self) -> None:
+        """지면 위에 강의명 라벨을 월드 고정으로 그린다. 지면 오클루더 위에
+        그려야 지면에 새긴 것처럼 보이고, 카메라가 지면을 볼 때만 나타난다."""
+        if self._cam is None:
+            return
+        _, _, scale = self._cam
+        target_w = int(GROUND_LABEL_WORLD_W * scale)
+        label = self._ground_label_surf
+        if target_w < 40 or label.get_width() == 0:
+            return   # 너무 멀면(작으면) 생략
+        target_h = max(4, int(label.get_height() * target_w / label.get_width()))
+        cx, cy = self._to_px(0.0, GROUND_LABEL_Y)
+        if cy < -target_h or cy > HEIGHT + target_h:
+            return   # 지면이 화면 밖이면 생략
+        scaled = pygame.transform.smoothscale(label, (target_w, target_h))
+        self.surface.blit(scaled, scaled.get_rect(center=(cx, cy)))
 
     def _pad(self, target: tuple[float, float]) -> None:
         """착륙 패드 표시선. 지표선(y=0)이라 지면 오클루더 위에 다시 그린다."""
@@ -709,6 +748,10 @@ class Renderer:
                            if p["age"] <= p["life"]][-MAX_PARTICLES:]
 
     def _emit_particles(self, state: State) -> None:
+        # 점화(추력 0 → >0) 순간을 감지한다. 하늘에서 무동력으로 떨어지다
+        # 엔진이 켜지는 그 순간 대량의 연기가 확 터진다.
+        ignited = self._prev_thrust <= 0.0 < state.thrust
+        self._prev_thrust = state.thrust
         if state.thrust <= 0.0:
             return
         ratio = state.thrust / (2.5 * G)          # 0~1, 추력 세기
@@ -727,6 +770,18 @@ class Renderer:
         dir_x = bxd * cos_t - byd * sin_t
         dir_y = bxd * sin_t + byd * cos_t
         base_angle = math.atan2(dir_y, dir_x)
+
+        if ignited:
+            # 점화 순간: 넓은 원뿔로 대량의 연기가 확 퍼진다.
+            for _ in range(55):
+                sp = self._rng.uniform(25.0, 110.0)
+                ang = base_angle + self._rng.uniform(-1.1, 1.1)
+                self._particles.append({
+                    "x": nozzle_x, "y": nozzle_y,
+                    "vx": sp * math.cos(ang), "vy": sp * math.sin(ang),
+                    "age": 0.0, "kind": "smoke",
+                    "life": self._rng.uniform(1.4, 2.2),
+                })
 
         for _ in range(n):
             speed = self._rng.uniform(speed_lo, speed_hi)
@@ -980,39 +1035,56 @@ class Renderer:
         self.surface.blit(art, art.get_rect(
             center=self._body_to_px(state, 0.0, 2.0)))
 
+    # 화염 색 3겹: 붉은 외곽 → 주황 중간 → 흰-노랑 코어.
+    _FLAME_LAYERS = (
+        ((255, 110, 40), 1.00, 1.00),   # (색, 길이배율, 폭배율)
+        ((255, 168, 62), 0.78, 0.62),
+        ((255, 236, 150), 0.48, 0.34),
+    )
+
     def _flame(self, state: State) -> None:
-        """추력 단계에 따라 길이·굵기·색이 뚜렷이 달라지는 화염.
+        """텍스처드 화염. 단순 삼각형이 아니라 지그재그 윤곽의 다층 불꽃을
+        프레임마다 흔들어 자글자글 타오르게 그린다.
 
-        추력은 0 / 0.6G / 1.0G / 1.6G / 2.5G 다섯 단계다. 길이를 선형으로
-        잡으면 인접 단계가 비슷해 보여 구분되지 않는다. 지수를 0.75로 눌러
-        낮은 단계도 짧게, 최대 단계는 확실히 길게 만든다.
-
-        화염이 지면(y=0) 아래로 뻗으면 지면에 맞춰 자른다 — 안 그러면
-        불길이 땅을 뚫고 내려가 보인다. 잘린 배기는 반사된 입자가 좌우로
-        퍼지며 이어받는다.
+        추력이 셀수록 길고 굵다. 지면 아래로 뻗은 부분은 나중에 그려지는 지면
+        오클루더가 덮으므로 여기서 따로 자르지 않는다.
         """
         if state.thrust <= 0.0:
             return
         ratio = state.thrust / (2.5 * G)
-        length = 5.0 + 40.0 * ratio ** 0.75
-        half_w = 1.6 + 2.4 * ratio
-        # 약한 분사는 노란빛, 강한 분사는 흰빛이 도는 주황
-        color = ((255, 214, 92) if ratio < 0.3
-                 else (255, 158, 66) if ratio < 0.7 else (255, 236, 190))
+        length = 8.0 + 70.0 * ratio ** 0.75    # 더 길게 뻗는다
+        half_w = 1.8 + 2.8 * ratio
         base_by = -ROCKET_HEIGHT / 2.0
-        left = self._body_to_world(state, -half_w, base_by)
-        right = self._body_to_world(state, half_w, base_by)
-        tip = self._body_to_world(state, length * math.sin(state.phi),
-                                  base_by - length * math.cos(state.phi))
-        # 지면 클립: 화염 끝이 땅 아래로 가면 땅 높이에서 자른다.
-        base_mid_x = (left[0] + right[0]) / 2.0
-        base_mid_y = (left[1] + right[1]) / 2.0
-        if tip[1] < 0.0 < base_mid_y:
-            t = base_mid_y / (base_mid_y - tip[1])
-            tip = (base_mid_x + (tip[0] - base_mid_x) * t, 0.0)
-        pygame.draw.polygon(self.surface, color, [
-            self._to_px(*left), self._to_px(*right), self._to_px(*tip),
-        ])
+
+        # 화염 축(월드 단위벡터)과 수직 벡터. 배기는 기체 아래를 phi 만큼 꺾은
+        # 방향이다.
+        cos_t, sin_t = math.cos(state.theta), math.sin(state.theta)
+        ab_x, ab_y = math.sin(state.phi), -math.cos(state.phi)   # body 단위
+        ax = (ab_x * cos_t - ab_y * sin_t, ab_x * sin_t + ab_y * cos_t)
+        perp = (-ax[1], ax[0])
+        nx, ny = self._body_to_world(state, 0.0, base_by)
+        rng = self._rng
+        segs = 8
+
+        for color, lscale, wscale in self._FLAME_LAYERS:
+            L, W = length * lscale, half_w * wscale
+            wob = W * 0.55        # 자글자글한 흔들림 폭
+            pts = []
+            # 왼쪽 가장자리(밑동→끝), 그다음 오른쪽(끝→밑동)으로 윤곽을 만든다.
+            for side in (1.0, -1.0):
+                rng_seq = range(segs + 1) if side > 0 else range(segs, -1, -1)
+                for i in rng_seq:
+                    t = i / segs
+                    w = W * (1.0 - t) ** 0.7            # 끝으로 갈수록 가늘어짐
+                    jl = rng.uniform(-1.0, 1.0) * L * 0.05   # 길이 방향 흔들림
+                    jw = rng.uniform(-wob, wob) * (1.0 - t)  # 폭 방향 흔들림
+                    along = t * L + jl
+                    lat = side * w + jw
+                    wx = nx + ax[0] * along + perp[0] * lat
+                    wy = ny + ax[1] * along + perp[1] * lat
+                    pts.append(self._to_px(wx, wy))
+            if len(pts) >= 3:
+                pygame.draw.polygon(self.surface, color, pts)
 
     def _hud(self, state: State) -> None:
         speed = math.hypot(state.vx, state.vy)
