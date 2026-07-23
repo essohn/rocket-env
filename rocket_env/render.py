@@ -190,7 +190,7 @@ class Renderer:
 
     def draw(self, state: State, target: tuple[float, float],
              outcome: str, grip: float | None = None, settle: float = 0.0,
-             boom: float = 0.0):
+             boom: float = 0.0, hold_camera: bool = False):
         """한 프레임을 그린다.
 
         `grip`은 순전히 연출용 상태다(0=벌어짐, 1=다 묾) — 물리에는
@@ -198,8 +198,12 @@ class Renderer:
         그대로 동작한다.
 
         `boom`(0~1)은 폭발 연출 진행도다. 0보다 크면 로켓이 폭발한 상태로,
-        첫 프레임에 화구·버섯구름·파편을 뿜고 카메라가 줌아웃하며 섬광이
-        화면을 덮는다. 착지 속도가 빠른 실패에서만 쓴다.
+        첫 프레임에 본체 조각·화구·버섯구름을 뿜고 기체 스프라이트는 즉시
+        사라지며 카메라가 줌아웃하고 섬광이 화면을 덮는다.
+
+        `hold_camera`는 카메라를 직전 위치에 고정한다. 포획 마무리 연출에서
+        쓴다 — 로켓이 멎은 뒤 카메라가 목표로 계속 미끄러지면 정지한 기체가
+        화면에서 흘러 "점프"처럼 보이기 때문이다.
         """
         draw_state = self._catch_draw_state(state, outcome, settle)
         if grip is None:
@@ -207,14 +211,13 @@ class Renderer:
             grip = (1.0 if outcome == Outcome.SUCCESS
                     else self._approach_grip(draw_state, target))
 
-        # 폭발 시작: 충돌 지점에서 한 번만 파편을 뿜는다.
+        # 폭발 시작: 기체 위치에서 한 번만 본체 조각·화구·연기를 뿜는다.
         if boom > 0.0 and not self._boomed:
-            impact_x = draw_state.x
-            impact_y = max(0.0, draw_state.y - ROCKET_HEIGHT / 2.0)
-            self._emit_explosion(impact_x, impact_y)
+            self._emit_explosion(draw_state)
             self._boomed = True
 
-        self._update_camera(draw_state, target, boom)
+        if not hold_camera:
+            self._update_camera(draw_state, target, boom)
         self._update_particles(draw_state, boom)
 
         self.surface.blit(self._sky_surface, (0, 0))
@@ -227,8 +230,9 @@ class Renderer:
         # 폭발 중에는 하강 궤적선을 숨긴다 — 파란 선이 불길 위에 남으면 어색하다.
         if boom <= 0.0:
             self._trail()
-        # 폭발이 무르익으면 기체는 산산조각 나 더는 그리지 않는다.
-        if boom < 0.2:
+        # 폭발한 순간 기체는 산산조각 난다 — 스프라이트를 즉시 지우고 조각
+        # 파편이 그 자리를 대신한다.
+        if boom <= 0.0:
             self._rocket(draw_state)
         self._front_arm(target, grip)
         # 전경 구름은 로켓보다 카메라에 가까우므로 기체 위에 덮인다.
@@ -590,7 +594,8 @@ class Renderer:
     # 입자 종류별 공기 저항. 연기·버섯구름은 뭉근하게 느려지고, 파편은
     # 관성으로 멀리 날며, 먼지는 바람에 실려 천천히 흐른다.
     _DRAG = {"smoke": 0.88, "debris": 0.97, "dust": 0.94,
-             "boom_smoke": 0.90, "boom_fire": 0.85, "boom_debris": 0.96}
+             "boom_smoke": 0.91, "boom_fire": 0.85, "boom_debris": 0.96,
+             "frag": 0.97}
 
     def _update_particles(self, state: State, boom: float = 0.0) -> None:
         # 폭발한 뒤에는 엔진 배기를 더 뿜지 않는다 — 기체가 이미 사라졌다.
@@ -602,6 +607,9 @@ class Renderer:
             p["y"] += p["vy"] * DT
             p["vx"] *= self._DRAG.get(p["kind"], 0.95)
             p["vy"] *= self._DRAG.get(p["kind"], 0.95)
+            # 본체 조각·파편은 중력으로 포물선을 그리며 떨어진다(연출용).
+            if p["kind"] in ("frag", "boom_debris"):
+                p["vy"] -= 70.0 * DT
             # 바람 먼지는 매 프레임 바람 쪽으로 다시 끌린다 — 안 그러면 드래그로
             # 금방 멈춰 바람 방향이 안 보인다.
             if p["kind"] == "dust":
@@ -680,36 +688,69 @@ class Renderer:
                 "age": 0.0, "kind": "dust", "life": DUST_LIFE,
             })
 
-    def _emit_explosion(self, x: float, y: float) -> None:
-        """충돌 지점에서 화구·버섯구름·파편을 한 번에 뿜는다.
+    def _emit_explosion(self, state: State) -> None:
+        """기체가 폭발한다. 본체 조각이 강하게 흩어지고 버섯구름이 피어오른다.
 
-        - 버섯구름: 위쪽으로 솟구쳤다 항력에 눌려 좌우로 부푸는 검은 연기.
-        - 화구: 짧게 타오르는 밝은 주황 코어.
+        - 본체 조각: 기체 윤곽 안에 뿌린 흰 조각들이 중심에서 바깥으로 강하게
+          터진다. 스프라이트가 그 자리에서 산산조각 나는 것처럼 보인다.
+        - 화구: 충돌 순간 밝게 타오르는 코어(짧다).
+        - 버섯구름: 좁게 솟는 기둥(stem)과 그 위에서 좌우로 부푸는 갓(cap)을
+          따로 뿜어 버섯 모양을 만든다.
         - 파편: 전방향으로 빠르게 튀는 밝은 조각.
         """
         rng = self._rng
-        for _ in range(150):     # 버섯구름 연기: 위쪽 반구로 솟는다
-            ang = rng.uniform(math.pi * 0.15, math.pi * 0.85)   # 위쪽
-            spd = rng.uniform(18.0, 95.0)
+        cx, cy = state.x, state.y            # 기체 중심
+        ix, iy = state.x, max(2.0, state.y - ROCKET_HEIGHT / 2.0)   # 충돌점(지면 쪽)
+
+        # 본체 조각: 기체 영역에 뿌린 뒤 중심에서 바깥으로 터뜨린다.
+        for _ in range(80):
+            bx = rng.uniform(-BODY_HALF_W, BODY_HALF_W)
+            by = rng.uniform(-ROCKET_HEIGHT / 2.0, ROCKET_HEIGHT / 2.0)
+            wx, wy = self._body_to_world(state, bx, by)
+            dx, dy = wx - cx, wy - cy
+            d = math.hypot(dx, dy) + 1e-6
+            spd = rng.uniform(90.0, 280.0)
             self._particles.append({
-                "x": x + rng.uniform(-6, 6), "y": y + rng.uniform(0, 6),
-                "vx": spd * math.cos(ang), "vy": spd * math.sin(ang),
-                "age": 0.0, "kind": "boom_smoke",
-                "life": rng.uniform(1.6, 2.8),
+                "x": wx, "y": wy,
+                "vx": dx / d * spd + rng.uniform(-40, 40),
+                "vy": dy / d * spd + rng.uniform(30, 140),   # 위로도 튄다
+                "age": 0.0, "kind": "frag", "life": rng.uniform(0.6, 1.4),
             })
-        for _ in range(70):      # 화구: 밝고 짧다
+
+        # 화구: 밝은 코어, 짧게 타오른다.
+        for _ in range(90):
             ang = rng.uniform(0, 2 * math.pi)
-            spd = rng.uniform(20.0, 130.0)
+            spd = rng.uniform(20.0, 150.0)
             self._particles.append({
-                "x": x, "y": y + 2.0,
-                "vx": spd * math.cos(ang), "vy": abs(spd * math.sin(ang)) * 0.9,
-                "age": 0.0, "kind": "boom_fire", "life": rng.uniform(0.35, 0.7),
+                "x": ix, "y": iy + 2.0,
+                "vx": spd * math.cos(ang), "vy": abs(spd * math.sin(ang)) * 1.0,
+                "age": 0.0, "kind": "boom_fire", "life": rng.uniform(0.3, 0.65),
             })
-        for _ in range(110):     # 파편: 전방향, 빠르고 멀리
-            ang = rng.uniform(0, 2 * math.pi)
-            spd = rng.uniform(120.0, 340.0)
+
+        # 버섯구름 기둥(stem): 좁고 곧게 솟는다.
+        for _ in range(70):
             self._particles.append({
-                "x": x, "y": y + 1.0,
+                "x": ix + rng.uniform(-5, 5), "y": iy + rng.uniform(0, 8),
+                "vx": rng.uniform(-8, 8), "vy": rng.uniform(45, 110),
+                "age": 0.0, "kind": "boom_smoke", "life": rng.uniform(1.8, 3.0),
+            })
+        # 버섯구름 갓(cap): 기둥 위에서 좌우로 부푼다 — 위로 솟다 옆으로 퍼진다.
+        for _ in range(90):
+            ang = rng.uniform(0, 2 * math.pi)
+            r = rng.uniform(0.4, 1.0)
+            self._particles.append({
+                "x": ix + math.cos(ang) * 14 * r, "y": iy + rng.uniform(30, 55),
+                "vx": math.cos(ang) * rng.uniform(20, 70),
+                "vy": rng.uniform(8, 45),
+                "age": 0.0, "kind": "boom_smoke", "life": rng.uniform(1.8, 3.0),
+            })
+
+        # 파편: 전방향, 빠르고 멀리.
+        for _ in range(120):
+            ang = rng.uniform(0, 2 * math.pi)
+            spd = rng.uniform(130.0, 360.0)
+            self._particles.append({
+                "x": ix, "y": iy + 1.0,
                 "vx": spd * math.cos(ang), "vy": spd * math.sin(ang),
                 "age": 0.0, "kind": "boom_debris", "life": rng.uniform(0.5, 1.1),
             })
@@ -752,6 +793,14 @@ class Renderer:
             elif kind == "boom_debris":
                 radius_px = max(1, int(1.6 * scale))
                 color = (*DEBRIS_COLOR, int(245 * (1.0 - frac)))
+            elif kind == "frag":
+                # 본체 조각 — 흰 기체 색의 각진 덩어리. 사각형으로 그려
+                # 둥근 연기와 구분되게 한다.
+                s = max(2, int(2.4 * scale))
+                col = (*BODY_COLOR, int(255 * (1.0 - frac * 0.7)))
+                px, py = self._to_px(p["x"], p["y"])
+                pygame.draw.rect(overlay, col, pygame.Rect(px - s // 2, py - s // 2, s, s))
+                continue
             else:   # debris
                 radius_px = max(1, int(1.2 * scale))
                 color = (*DEBRIS_COLOR, int(240 * (1.0 - frac)))

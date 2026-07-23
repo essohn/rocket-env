@@ -51,10 +51,9 @@ ARTIFACTS_DIR = Path(__file__).resolve().parent.parent / "artifacts"
 # 마지막 상태 그대로 젓가락만 닫아가며 몇 프레임 더 그린다.
 # 젓가락이 조여지는 구간. 14프레임(0.7초)은 순식간이라 고정되는 느낌이
 # 없었다. 34프레임이면 1.7초에 걸쳐 천천히 물린다.
-GRIP_FRAMES = 34
-# 걸림 구조가 팔에 얹힐 때까지 미끄러지는 구간. 12프레임(0.6초)은 너무
-# 빨라 미끄러지는 동작이 보이지 않았다. 34프레임이면 1.7초에 걸쳐 내려온다.
-SETTLE_FRAMES = 34      # grip 0 -> 1로 닫히는 구간
+# 집게 조임과 기체 안착을 함께 진행하는 구간. 한 동작이라 예전의 grip+settle
+# 두 구간(각 34)을 하나로 합쳤다.
+CATCH_SETTLE_FRAMES = 46
 HOLD_FRAMES = 24      # 다 물고 정지해 있는 구간 (fps=20 기준 약 1.2초)
 
 
@@ -89,7 +88,7 @@ def train_or_load(env, model_path: Path, *, steps: int, lr: float, seed: int):
 def closing_frames(env, outcome: str, is_success: bool) -> list[np.ndarray]:
     """에피소드의 마지막 상태로 마무리 연출 프레임을 만든다.
 
-    캐치 성공이면 젓가락이 grip 0 -> 1로 닫히는 GRIP_FRAMES에 이어, 다 문
+    캐치 성공이면 젓가락이 조여지며 기체가 안착하는 CATCH_SETTLE_FRAMES 에 이어, 다 문
     채(grip=1.0) 정지한 HOLD_FRAMES를 붙인다. 로켓은 `_catch_draw_state`가
     이미 팔에 매단 위치·자세 0·추력 0으로 그리므로 이 구간 내내 완전히
     정지해 보인다. 착륙 성공은 젓가락이 없으니 HOLD_FRAMES만 붙여 영상
@@ -120,23 +119,27 @@ def closing_frames(env, outcome: str, is_success: bool) -> list[np.ndarray]:
 
     frames = []
     if is_catch:
-        # 1단계: 집게가 마저 조여진다. 접근 중 이미 GRIP_APPROACH_MAX 까지
-        # 닫혀 있으므로 0이 아니라 그 값에서 이어받는다 — 0부터 시작하면
-        # 젓가락이 한 번 벌어졌다 닫히는 것처럼 보인다.
-        for i in range(GRIP_FRAMES):
-            t = i / (GRIP_FRAMES - 1)
+        # 집게가 조여지는 것과 기체가 걸림 구조에 얹히는 것을 한 동작으로
+        # 동시에 진행한다. 예전처럼 grip 을 다 닫은 뒤 따로 미끄러뜨리면,
+        # "잡은 다음 본체가 내려가는" 두 박자가 되어 점프처럼 보였다.
+        # 카메라도 직전 위치에 고정한다(hold_camera) — 안 그러면 멎은 기체를
+        # 카메라가 계속 좇아가 화면에서 흘러 점프처럼 보인다.
+        for i in range(CATCH_SETTLE_FRAMES):
+            t = i / (CATCH_SETTLE_FRAMES - 1)
             grip = GRIP_APPROACH_MAX + (1.0 - GRIP_APPROACH_MAX) * t
             frames.append(renderer.draw(state, target, outcome,
-                                        grip=grip, settle=0.0))
-        # 2단계: 기체가 미끄러져 내려가 걸림 구조가 팔에 얹힌다.
-        for i in range(SETTLE_FRAMES):
-            frames.append(renderer.draw(state, target, outcome, grip=1.0,
-                                        settle=i / (SETTLE_FRAMES - 1)))
-    hold_grip = 1.0 if is_catch else 0.0
-    hold_settle = 1.0 if is_catch else 0.0
-    frames.extend(renderer.draw(state, target, outcome, grip=hold_grip,
-                                settle=hold_settle)
-                  for _ in range(HOLD_FRAMES))
+                                        grip=grip, settle=t, hold_camera=True))
+        frames.extend(
+            renderer.draw(state, target, outcome, grip=1.0, settle=1.0,
+                          hold_camera=True)
+            for _ in range(HOLD_FRAMES))
+    else:
+        # 착륙 성공: 젓가락이 없으니 정지한 기체를 몇 프레임 더 보여준다.
+        # 접지한 기체가 카메라 드리프트로 흐르지 않게 카메라를 고정한다.
+        frames.extend(
+            renderer.draw(state, target, outcome, grip=0.0, settle=0.0,
+                          hold_camera=True)
+            for _ in range(HOLD_FRAMES))
     return frames
 
 
