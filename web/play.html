@@ -200,8 +200,11 @@ function step(){
     const ok = spd<r.vmax && tilt<10*Math.PI/180 && om<10*Math.PI/180 && Math.abs(s.x)<r.zone;
     outcome=ok?"LANDED":"CRASHED"; s.y=GROUND;
     score=landingScore();
-    // 크래시: 즉발 폭발이 아니라 지면에 파고들며 찌그러진 뒤 폭발한다.
-    if(!ok){ crash={t:0, spd, pen:0, crush:0, penMax:Math.min(13, 2+spd*0.13)}; }
+    // 크래시: 접지 순간의 하강 속도 그대로 지면에 박히기 시작해, 저항으로
+    // 감속하며 찌그러진 뒤 폭발한다(즉발 폭발 아님).
+    if(!ok){ const pv=Math.abs(s.vy);
+      crash={t:0, spd, pvel:pv, pvel0:Math.max(1,pv), pen:0, crush:0,
+        crushMax:Math.max(.15,Math.min(.5,0.15+spd*0.006))}; }
   } else if(s.fuel!==null && s.fuel<=0 && th===0 && s.vy<-r.vmax){
     // 연료 소진 후에도 계속 판정은 접지에서
   } else if(s.step>=MAX_STEPS){ outcome="OUT OF TIME"; score=landingScore(); }
@@ -238,18 +241,18 @@ function explode(spd){
       age:0,life:rand(4,7.5),k:"bs"});}
 }
 // ── 크래시 연출: 파고듦 → 찌그러짐 → 폭발 ────────────────────────
-const CRUSH_FRAMES=7;                 // 파고들며 찌그러지는 구간(0.35s @20Hz)
+const CRUSH_MAX_FRAMES=12;            // 안전 상한(감속이 끝나면 그 전에 멈춤)
 function advanceCrash(){
   crash.t++;
-  if(crash.t<=CRUSH_FRAMES){
-    const e=crash.t/CRUSH_FRAMES;                 // 0→1
-    crash.pen=crash.penMax*(1-(1-e)*(1-e));        // ease-out 로 지면에 박힘
-    crash.crush=0.5*e;                             // 최대 50% 압착
-    emitCrashDust(4);                              // 밑에서 먼지 튀김
-  } else if(crash.t===CRUSH_FRAMES+1){
-    crash.pen=crash.penMax; crash.crush=0.5;
-    spawnFragments(crash.spd);                     // 4~5 조각으로 부서짐
-    boom=1e-6; explode(crash.spd);                 // 그리고 본격 폭발
+  if(crash.pvel>0.6 && crash.t<CRUSH_MAX_FRAMES){
+    crash.pen=Math.min(15, crash.pen + crash.pvel*DT);   // 접지 속도 그대로 파고듦
+    crash.pvel*=0.5;                                       // 지면 저항으로 감속
+    crash.crush=crash.crushMax*(1-crash.pvel/crash.pvel0);// 감속한 만큼 찌그러짐
+    emitCrashDust(4);                                     // 밑에서 먼지 튀김
+  } else {                                                // 정지 → 부서지며 폭발
+    crash.crush=crash.crushMax;
+    spawnFragments(crash.spd);
+    boom=1e-6; explode(crash.spd);
   }
 }
 function emitCrashDust(n){
