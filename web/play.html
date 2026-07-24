@@ -360,9 +360,9 @@ function drawCrushedRocket(){
     return to(S.x+bx*ct-byc*si, (S.y-pen)+bx*si+byc*ct); };
   const cpoly=(pts)=>{ctx.beginPath();pts.forEach(([bx,by],i)=>{const[x,y]=cbTo(bx,by);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.closePath();ctx.fill();};
   const bw=w*(1+cr*0.6);                                       // 바닥이 찌그러져 넓어짐
-  ctx.fillStyle="#6f747e"; cpoly([[-w-1.2,-H/2],[w+1.2,-H/2],[w,-H/2+5],[-w,-H/2+5]]);
-  ctx.fillStyle="#d6d8de"; cpoly([[-bw,-H/2+4],[bw,-H/2+4],[w,H/2-1.5],[w-1.4,H/2],[-w+1.4,H/2],[-w,H/2-1.5]]);
-  ctx.fillStyle="#a7adba"; for(const s of[-1,1])cpoly([[s*w,H/2-4],[s*(w+3.4),H/2-4],[s*(w+3.4),H/2-1.2],[s*w,H/2-1.2]]);
+  ctx.fillStyle="#787d87"; cpoly([[-w-1.2,-H/2],[w+1.2,-H/2],[w,-H/2+5],[-w,-H/2+5]]);   // 원래 색 유지
+  ctx.fillStyle="#e8eaee"; cpoly([[-bw,-H/2+4],[bw,-H/2+4],[w,H/2-1.5],[w-1.4,H/2],[-w+1.4,H/2],[-w,H/2-1.5]]);
+  ctx.fillStyle="#b0b6c2"; for(const s of[-1,1])cpoly([[s*w,H/2-4],[s*(w+3.4),H/2-4],[s*(w+3.4),H/2-1.2],[s*w,H/2-1.2]]);
 }
 const FL=[["rgba(255,110,40,.95)",1,1],["rgba(255,168,62,.95)",.78,.62],["rgba(255,236,150,.95)",.48,.34]];
 function drawFlame(){

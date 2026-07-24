@@ -1100,12 +1100,12 @@ class Renderer:
         bw = BODY_HALF_W * (1.0 + crush * 0.6)   # 바닥이 찌그러져 넓어짐
         skirt = [(-BODY_HALF_W - 1.2, -half), (BODY_HALF_W + 1.2, -half),
                  (BODY_HALF_W, cby(-half + 5.0)), (-BODY_HALF_W, cby(-half + 5.0))]
-        pygame.draw.polygon(self.surface, (111, 116, 126),
+        pygame.draw.polygon(self.surface, FIN_COLOR,       # 원래 색 그대로
                             [poly(st, bx, by) for bx, by in skirt])
         body = [(-bw, cby(-half + 4.0)), (bw, cby(-half + 4.0)),
                 (BODY_HALF_W, cby(half - 1.5)), (BODY_HALF_W - 1.4, cby(half)),
                 (-BODY_HALF_W + 1.4, cby(half)), (-BODY_HALF_W, cby(half - 1.5))]
-        pygame.draw.polygon(self.surface, (214, 216, 222),
+        pygame.draw.polygon(self.surface, BODY_COLOR,      # 원래 색 그대로
                             [poly(st, bx, by) for bx, by in body])
         for sign in (-1, 1):
             pin = [(sign * BODY_HALF_W, cby(PIN_Y - PIN_THICK)),
