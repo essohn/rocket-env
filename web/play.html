@@ -113,6 +113,7 @@ function skyColor(y){
 const cvs=document.getElementById("c"), ctx=cvs.getContext("2d");
 const W=cvs.width, Hh=cvs.height;
 let S, cam, particles, thrust, outcome, boom, boomI, frames, roundKey, rng;
+let crash=null;                              // 크래시 연출 상태(파고듦→찌그러짐→폭발)
 let score=null;                              // 종료 시 착륙 점수
 let held={left:false,right:false};
 // 영상 녹화(MediaRecorder). 에피소드마다 새로 녹화하고, 종료 후 V 로 저장.
@@ -125,7 +126,7 @@ function reset(){
   S={x:rand(-r.x,r.x), y:r.y, vx:0, vy:r.vy,
      theta:rand(-r.th,r.th)*Math.PI/180, omega:osgn*rand(r.om[0],r.om[1])*Math.PI/180,
      phi:0, fuel:r.fuel, wind:r.wind?(r.gust?0:r.wind):0, step:0};
-  cam=null; particles=[]; thrust=0; outcome=null; boom=0; boomI=1; frames=0;
+  cam=null; particles=[]; thrust=0; outcome=null; boom=0; boomI=1; frames=0; crash=null;
   score=null; recStopIn=0; startRec();
   document.getElementById("phys").textContent=
     `${LABEL[roundKey]} · 접지 <${r.vmax} m/s · 존 ±${r.zone} m`;
@@ -199,7 +200,8 @@ function step(){
     const ok = spd<r.vmax && tilt<10*Math.PI/180 && om<10*Math.PI/180 && Math.abs(s.x)<r.zone;
     outcome=ok?"LANDED":"CRASHED"; s.y=GROUND;
     score=landingScore();
-    if(!ok){ boom=1e-6; explode(spd); }   // 크래시는 속도에 비례해 항상 폭발
+    // 크래시: 즉발 폭발이 아니라 지면에 파고들며 찌그러진 뒤 폭발한다.
+    if(!ok){ crash={t:0, spd, pen:0, crush:0, penMax:Math.min(13, 2+spd*0.13)}; }
   } else if(s.fuel!==null && s.fuel<=0 && th===0 && s.vy<-r.vmax){
     // 연료 소진 후에도 계속 판정은 접지에서
   } else if(s.step>=MAX_STEPS){ outcome="OUT OF TIME"; score=landingScore(); }
@@ -235,15 +237,46 @@ function explode(spd){
       y0:iy,bill:rand(-1,1),sm:big?rand(1.5,2.2):rand(.45,.7),am:big?rand(.35,.6):rand(1.15,1.6),
       age:0,life:rand(4,7.5),k:"bs"});}
 }
+// ── 크래시 연출: 파고듦 → 찌그러짐 → 폭발 ────────────────────────
+const CRUSH_FRAMES=7;                 // 파고들며 찌그러지는 구간(0.35s @20Hz)
+function advanceCrash(){
+  crash.t++;
+  if(crash.t<=CRUSH_FRAMES){
+    const e=crash.t/CRUSH_FRAMES;                 // 0→1
+    crash.pen=crash.penMax*(1-(1-e)*(1-e));        // ease-out 로 지면에 박힘
+    crash.crush=0.5*e;                             // 최대 50% 압착
+    emitCrashDust(4);                              // 밑에서 먼지 튀김
+  } else if(crash.t===CRUSH_FRAMES+1){
+    crash.pen=crash.penMax; crash.crush=0.5;
+    spawnFragments(crash.spd);                     // 4~5 조각으로 부서짐
+    boom=1e-6; explode(crash.spd);                 // 그리고 본격 폭발
+  }
+}
+function emitCrashDust(n){
+  for(let i=0;i<n;i++){ const sp=rand(20,70);
+    particles.push({x:S.x+rand(-4,4), y:rand(0,4),
+      vx:(Math.random()<.5?-1:1)*sp*rand(.4,1), vy:rand(10,55), age:0, life:rand(.5,1.0), k:"s"});}
+}
+function spawnFragments(spd){
+  const n=5, vs=.7+.5*Math.min(1.2,spd/42);
+  const cols=["#e8eaee","#c9ccd4","#9aa0ac","#787d87","#d6d8de"];
+  for(let i=0;i<n;i++){ const dir=(i-(n-1)/2);      // 좌우로 부챗살처럼
+    particles.push({x:S.x+dir*3, y:rand(2,10),
+      vx:dir*rand(18,40)+rand(-15,15), vy:rand(60,150)*vs,
+      rot:rand(0,7), vrot:rand(-11,11), w:rand(3.5,6), h:rand(6,13),
+      age:0, life:rand(1.4,2.4), k:"frag", col:cols[i%cols.length]});}
+}
 function updateParticles(){
   for(const p of particles){
     p.x+=p.vx*DT; p.y+=p.vy*DT;
-    const drag=p.k==="s"?.88:p.k==="bs"?.91:p.k==="f"?.85:.96;
+    const drag=p.k==="s"?.88:p.k==="bs"?.91:p.k==="f"?.85:p.k==="frag"?.995:.96;
     p.vx*=drag; p.vy*=drag;
     if(p.k==="s") p.vy+=11*DT;
     else if(p.k==="bs"){p.vy+=26*DT; if(p.y-(p.y0||p.y)>30)p.vx+=(p.bill||0)*30*DT;}
+    else if(p.k==="frag"){ p.vy-=150*DT; p.rot+=p.vrot*DT; }   // 조각: 중력 + 회전
     else if(p.k==="d"||p.k==="f") p.vy-=70*DT;
-    if(p.y<0){const sd=Math.abs(p.vy);p.y=0;const out=p.vx>=0?1:-1;p.vx+=out*sd*.85;p.vy=sd*.18;}
+    if(p.y<0){const sd=Math.abs(p.vy);p.y=0;const out=p.vx>=0?1:-1;p.vx+=out*sd*.85;p.vy=sd*.18;
+      if(p.k==="frag"){p.vx*=.5;p.vrot*=.6;}}                   // 조각은 튕기며 구른다
     p.age+=DT;
   }
   particles=particles.filter(p=>p.age<=p.life).slice(-900);
@@ -271,8 +304,8 @@ function draw(){
   ctx.beginPath();let f=true;for(const p of trail){const[x,y]=to(p[0],p[1]);if(f){ctx.moveTo(x,y);f=false;}else ctx.lineTo(x,y);}ctx.stroke();
   // 지면
   const[,gy]=to(0,0);
-  // 로켓 & 화염 (폭발 전만)
-  if(boom<=0){drawFlame();drawRocket();}
+  // 로켓 & 화염 (폭발 전만). 크래시 중에는 찌그러진 로켓을 그린다.
+  if(boom<=0){ if(crash){ drawCrushedRocket(); } else { drawFlame(); drawRocket(); } }
   // 입자
   drawParticles(sc);
   // 지면 오클루더 (지표 아래 가림) + 패드
@@ -316,6 +349,18 @@ function drawRocket(){
     const n=txt.length;for(let i=0;i<n;i++)ctx.fillText(txt[i],0,(i-(n-1)/2)*gh);
     ctx.restore();}
 }
+// 찌그러진 로켓: 엔진(-H/2)이 지면에 박히고(pen), 위로 눌려 압착된다(crush).
+function drawCrushedRocket(){
+  const w=4.2, cr=crash.crush, pen=crash.pen;
+  const ct=Math.cos(S.theta), si=Math.sin(S.theta);
+  const cbTo=(bx,by)=>{ const byc=-H/2+(by+H/2)*(1-cr);       // 바닥 고정, 위를 압착
+    return to(S.x+bx*ct-byc*si, (S.y-pen)+bx*si+byc*ct); };
+  const cpoly=(pts)=>{ctx.beginPath();pts.forEach(([bx,by],i)=>{const[x,y]=cbTo(bx,by);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.closePath();ctx.fill();};
+  const bw=w*(1+cr*0.6);                                       // 바닥이 찌그러져 넓어짐
+  ctx.fillStyle="#6f747e"; cpoly([[-w-1.2,-H/2],[w+1.2,-H/2],[w,-H/2+5],[-w,-H/2+5]]);
+  ctx.fillStyle="#d6d8de"; cpoly([[-bw,-H/2+4],[bw,-H/2+4],[w,H/2-1.5],[w-1.4,H/2],[-w+1.4,H/2],[-w,H/2-1.5]]);
+  ctx.fillStyle="#a7adba"; for(const s of[-1,1])cpoly([[s*w,H/2-4],[s*(w+3.4),H/2-4],[s*(w+3.4),H/2-1.2],[s*w,H/2-1.2]]);
+}
 const FL=[["rgba(255,110,40,.95)",1,1],["rgba(255,168,62,.95)",.78,.62],["rgba(255,236,150,.95)",.48,.34]];
 function drawFlame(){
   const th=THRUST[thrust];if(th<=0)return;
@@ -340,6 +385,10 @@ function drawParticles(sc){
     else if(p.k==="bs"){const rd=Math.max(2,(4+26*f)*(p.sm||1)*sc);
       ctx.fillStyle=`rgba(60,52,50,${Math.max(0,Math.min(1,.78*(p.am||1)*(1-f)**1.3))})`;circle(x,y,rd);}
     else if(p.k==="f"){const rd=Math.max(1,(3+8*f)*sc);ctx.fillStyle=`rgba(255,${Math.round(200-120*f)},${Math.round(120-60*f)},${.9*(1-f)})`;circle(x,y,rd);}
+    else if(p.k==="frag"){ ctx.save(); ctx.translate(x,y); ctx.rotate(p.rot||0);
+      ctx.globalAlpha=Math.max(0,1-f*f); ctx.fillStyle=p.col||"#c9ccd4";
+      const fw=Math.max(1,(p.w||4)*sc), fh=Math.max(1,(p.h||8)*sc);
+      ctx.fillRect(-fw/2,-fh/2,fw,fh); ctx.globalAlpha=1; ctx.restore(); }
     else{const rd=Math.max(1,1.5*sc);ctx.fillStyle=`rgba(250,226,190,${.95*(1-f)})`;circle(x,y,rd);}
   }
 }
@@ -403,7 +452,8 @@ const STEP_MS=DT*1000;
 let lastT=0, acc=0;
 function fixedStep(){
   if(!outcome){ step(); trail.push([S.x,S.y]); if(trail.length>400)trail.shift(); }
-  else if(boom>0){ boom=Math.min(1,boom+1/40); }
+  else { if(crash && boom<=0) advanceCrash();          // 파고듦·찌그러짐 진행
+         if(boom>0) boom=Math.min(1,boom+1/40); }
   // 종료 후 폭발·점수를 담도록 잠시 더 녹화한 뒤 멈춘다.
   if(outcome && recStopIn===0 && recorder && recorder.state==="recording") recStopIn=45;
   if(recStopIn>0 && --recStopIn===0) stopRec();
