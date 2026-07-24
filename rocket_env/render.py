@@ -237,7 +237,8 @@ class Renderer:
              outcome: str, grip: float | None = None, settle: float = 0.0,
              boom: float = 0.0, hold_camera: bool = False,
              action_info=None, retry_hint: bool = False,
-             score: float | None = None):
+             score: float | None = None,
+             crush: tuple[float, float] | None = None):
         """한 프레임을 그린다.
 
         `action_info`(선택)는 우측 상단 행동 시각화에 쓴다. 정수(선택된 행동
@@ -290,9 +291,13 @@ class Renderer:
         if boom <= 0.0:
             self._trail()
         # 폭발한 순간 기체는 산산조각 난다 — 스프라이트를 즉시 지우고 조각
-        # 파편이 그 자리를 대신한다.
+        # 파편이 그 자리를 대신한다. 폭발 직전 크래시 구간에는 지면에 파고들며
+        # 찌그러진 기체를 그린다(crush=(파고든 깊이, 압착률)).
         if boom <= 0.0:
-            self._rocket(draw_state)
+            if crush is not None:
+                self._rocket_crushed(draw_state, crush[0], crush[1])
+            else:
+                self._rocket(draw_state)
         self._front_arm(target, grip)
         # 전경 구름은 로켓보다 카메라에 가까우므로 기체 위에 덮인다.
         # 가끔 로켓을 스쳐 지나가며 깊이감을 만든다.
@@ -1079,6 +1084,36 @@ class Renderer:
 
         self._paint_livery(state)
         self._flame(state)
+
+    def _rocket_crushed(self, state: State, pen: float, crush: float) -> None:
+        """지면에 파고들며 찌그러진 기체. 엔진(-half)을 바닥에 고정한 채 위를
+        눌러 압착하고(crush), 전체를 pen 만큼 아래로 내려 지면에 박는다. 지면
+        오클루더가 지표 아래를 가리므로 박힌 부분은 자연스럽게 묻힌다."""
+        from dataclasses import replace
+        st = replace(state, y=state.y - pen)
+        half = ROCKET_HEIGHT / 2.0
+        poly = self._body_to_px
+
+        def cby(by: float) -> float:            # 바닥 고정, 위를 압착
+            return -half + (by + half) * (1.0 - crush)
+
+        bw = BODY_HALF_W * (1.0 + crush * 0.6)   # 바닥이 찌그러져 넓어짐
+        skirt = [(-BODY_HALF_W - 1.2, -half), (BODY_HALF_W + 1.2, -half),
+                 (BODY_HALF_W, cby(-half + 5.0)), (-BODY_HALF_W, cby(-half + 5.0))]
+        pygame.draw.polygon(self.surface, (111, 116, 126),
+                            [poly(st, bx, by) for bx, by in skirt])
+        body = [(-bw, cby(-half + 4.0)), (bw, cby(-half + 4.0)),
+                (BODY_HALF_W, cby(half - 1.5)), (BODY_HALF_W - 1.4, cby(half)),
+                (-BODY_HALF_W + 1.4, cby(half)), (-BODY_HALF_W, cby(half - 1.5))]
+        pygame.draw.polygon(self.surface, (214, 216, 222),
+                            [poly(st, bx, by) for bx, by in body])
+        for sign in (-1, 1):
+            pin = [(sign * BODY_HALF_W, cby(PIN_Y - PIN_THICK)),
+                   (sign * (BODY_HALF_W + PIN_OUT), cby(PIN_Y - PIN_THICK)),
+                   (sign * (BODY_HALF_W + PIN_OUT), cby(PIN_Y + PIN_THICK)),
+                   (sign * BODY_HALF_W, cby(PIN_Y + PIN_THICK))]
+            pygame.draw.polygon(self.surface, PIN_COLOR,
+                                [poly(st, bx, by) for bx, by in pin])
 
     def _build_livery(self) -> pygame.Surface:
         """세로로 읽히는 기체 도색. 문구는 cfg["livery"](학생 별명 등)에서 온다.

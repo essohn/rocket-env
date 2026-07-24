@@ -26,7 +26,6 @@ import pygame
 
 import rocket_env  # noqa: F401  (환경 등록)
 from rocket_env.config import PRESETS
-from rocket_env.render import EXPLODE_SPEED
 from rocket_env.types import Outcome
 
 MAX_VIDEO_FRAMES = 900   # 최근 프레임만 보관(메모리 상한). 한 에피소드에 충분하다.
@@ -65,6 +64,7 @@ THRUST_KEYS_DOWN = (pygame.K_DOWN, pygame.K_s)
 QUIT_KEYS = (pygame.K_ESCAPE, pygame.K_q)
 CRASH_OUTCOMES = (Outcome.CRASH, Outcome.MISSED, Outcome.OUT_OF_FUEL)
 BOOM_FRAMES = 40    # 폭발 연출 길이(프레임)
+CRUSH_FRAMES = 7    # 폭발 전 파고듦·찌그러짐 길이(프레임, 0.35s @20Hz)
 
 
 def main() -> None:
@@ -86,6 +86,9 @@ def main() -> None:
     thrust = 0          # 현재 추력 단계(0~4). ↑/↓ 로 바꾼다.
     done = False
     boom_t = 0.0        # 폭발 연출 진행도(0=없음). 빠른 충돌에서 0→1 로 오른다.
+    crushing = False    # 크래시 직후 파고듦·찌그러짐 구간 진행 중인가
+    crush_t = 0
+    pen_max = 0.0       # 접지 속도에 비례한 최대 파고듦 깊이(월드 단위)
     score = None        # 종료 시 착륙 점수
     frames = deque(maxlen=MAX_VIDEO_FRAMES)   # 영상 저장용 최근 프레임
     frames.append(_grab_frame(unwrapped._renderer))
@@ -100,6 +103,7 @@ def main() -> None:
                 elif event.key == pygame.K_r:
                     obs, info = env.reset()
                     thrust, done, boom_t, score = 0, False, 0.0, None
+                    crushing, crush_t = False, 0
                     frames.clear()
                 elif event.key == pygame.K_v:
                     _save_video(frames, args.livery, score)
@@ -124,20 +128,30 @@ def main() -> None:
                 mark = "성공!" if info["is_success"] else "실패"
                 print(f"[{outcome}] {mark}  점수 {score:.0f}  "
                       f"접지속도 {info['impact_speed']}  (R 재시작 · V 영상저장)")
-                # 빠른 충돌은 폭발한다.
-                if (outcome in CRASH_OUTCOMES
-                        and (info["impact_speed"] or 0.0) > EXPLODE_SPEED):
-                    boom_t = 1e-6   # 다음 프레임부터 폭발 연출 시작
+                # 크래시는 지면에 파고들며 찌그러진 뒤 폭발한다(속도에 비례한 깊이).
+                if outcome in CRASH_OUTCOMES:
+                    crushing, crush_t = True, 0
+                    spd = info["impact_speed"] or 0.0
+                    pen_max = min(13.0, 2.0 + spd * 0.13)
 
         if done:
-            # 종료: 큰 점수·재시작 안내를 띄우고, 빠른 충돌이면 폭발 연출
-            # (boom 0→1)을 이어 그린다. env.render 는 점수·안내가 없으므로
-            # 렌더러를 직접 부른다.
+            # 종료: 큰 점수·재시작 안내를 띄운다. 크래시면 먼저 파고듦·찌그러짐
+            # (crush)을 진행하고, 그 구간이 끝나면 폭발(boom 0→1)로 넘어간다.
+            # env.render 는 점수·안내가 없으므로 렌더러를 직접 부른다.
+            crush = None
+            if crushing:
+                crush_t += 1
+                if crush_t <= CRUSH_FRAMES:
+                    e = crush_t / CRUSH_FRAMES
+                    crush = (pen_max * (1.0 - (1.0 - e) ** 2), 0.5 * e)
+                else:
+                    crushing = False
+                    boom_t = 1e-6   # 크러시 끝 → 폭발 시작(조각·화구는 렌더러가 방출)
             if boom_t > 0.0:
                 boom_t = min(1.0, boom_t + 1.0 / BOOM_FRAMES)
             unwrapped._renderer.draw(
                 unwrapped.state, unwrapped._target, unwrapped._outcome,
-                boom=boom_t, retry_hint=True, score=score)
+                boom=boom_t, retry_hint=True, score=score, crush=crush)
         else:
             env.render()   # human 모드는 내부에서 20Hz 로 페이싱한다
 
